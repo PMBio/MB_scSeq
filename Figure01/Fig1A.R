@@ -23,37 +23,6 @@ getAnnotations<-function(gene_name)
   return(annot)
 }
 
-modify_clone_colors<-function(plot_mod, chrs_num)
-{
-  library(grid)
-  # Generate the ggplot2 plot grob
-  g <- grid.force(ggplotGrob(plot_mod))
-  # Get the names of grobs and their gPaths into a data.frame structure
-  grobs_df <- do.call(cbind.data.frame, grid.ls(g, print = FALSE))
-  # Build optimal gPaths that will be later used to identify grobs and edit them
-  grobs_df$gPath_full <- paste(grobs_df$gPath, grobs_df$name, sep = "::")
-  grobs_df$gPath_full <- gsub(pattern = "layout::", 
-                              replacement = "", 
-                              x = grobs_df$gPath_full, 
-                              fixed = TRUE)
-  
-  # Get the gPaths of the strip background grobs
-  strip_bg_gpath <- grobs_df$gPath_full[grepl(pattern = "strip\\.background.*", 
-                                              x = grobs_df$gPath_full)]
-  # Generate some color
-  fills <- RColorBrewer::brewer.pal(n = 7, name = "Set1")
-  aux<-fills[1]
-  fills[1]<-fills[3]
-  fills[3]<-aux
-  
-  for (i in (chrs_num+1):length(strip_bg_gpath)){
-    g <- editGrob(grob = g, gPath = strip_bg_gpath[i], gp = gpar(fill = fills[i-chrs_num]))
-  }
-  # Draw the edited plot
-  # grid.newpage(); grid.draw(g)
-  return(g)
-}
-
 get_gene_segments<-function(gene_name, Segments_Matrix, segment_coords, segment_chromosomes)
 {
   annot<-getAnnotations(gene_name)
