@@ -1,1 +1,1 @@
-# FIUGRE 2
+# FIGURE 2
