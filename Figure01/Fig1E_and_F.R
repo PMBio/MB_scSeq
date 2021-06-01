@@ -2,6 +2,8 @@
 # This scripts is used to generate subpanels in Fig1A
 # Autor: R. Gonzalo Parra
 # May 16, 2021
+#
+# It reads previously calculated CT score matrix for all samples
 # ---------------------------------------------------------
 
 
