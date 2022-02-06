@@ -20,5 +20,5 @@
 
 **bulkRNA_GSEA_analysis.R** - R script to run GSEA on the DEGs from the bulk RNA-sequencing data.
 
-**XX.R** - R script to create violin plots from the upregulated and downregulated genes resulting from the bulk RNA DESeq2 analysis. The boxplots are shown in Figure3. 
+**ct_score_boxplots.R** - R script to create boxplots plots from the upregulated and downregulated genes resulting from the bulk RNA DESeq2 analysis.
 
