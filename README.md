@@ -1,8 +1,8 @@
 # Title: "SINGLE CELL MULTI-OMICS ANALYSIS OF CHROMOTHRIPTIC MEDULLOBLASTOMA HIGHLIGHTS GENOMIC AND TRANSCRIPTOMIC CONSEQUENCES OF GENOME INSTABILITY"
 
-## Author: Gonzalo Parra, Moritz J. Przybilla & Hana Susak
+## Authors: Gonzalo Parra, Moritz J. Przybilla & Hana Susak
 
-## Date: 01/06/2021
+## Date: 06/02/2022
 
 This repository was created to store and provide all scripts used in the manuscript "SINGLE CELL MULTI-OMICS ANALYSIS OF CHROMOTHRIPTIC MEDULLOBLASTOMA HIGHLIGHTS GENOMIC AND TRANSCRIPTOMIC CONSEQUENCES OF GENOME INSTABILITY". This includes the scripts for generation of all figures and for the analyses implemented. In line with the structure of the manuscript, the scripts are split according each individual Figure. 
 
@@ -12,7 +12,7 @@ This repository was created to store and provide all scripts used in the manuscr
 
 **Figure03** - Distinct transcriptional programs dominate malignant cell types in medulloblastoma with chromothripsis.
 
-**Figure04** - ntegrating DNA and RNA on single cell level reveals copy number related pathway alterations. 
+**Figure04** - Integrating DNA and RNA on single cell level reveals copy number related pathway alterations. 
 
 **Figure05** - Combining single-nuclei DNA-seq and bulk whole-genome sequencing identifies early events potentially facilitating chromothripsis.
 
