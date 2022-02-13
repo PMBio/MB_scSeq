@@ -291,10 +291,9 @@ results$color <- factor(results$color, levels = c("NS", "Log2FC", "p-value", "Lo
 col.values <- c("lightgrey", pal_lancet("lanonc")(3))
 options(ggrepel.max.overlaps = Inf)
 
-up.data <- results %>% filter(pvalue < 0.00001 , log2FoldChange >= 1)
-up.data <- up.data[-grep("RP", up.data$gene_name),]
-down.data <- results %>% filter(pvalue < 0.00001 , log2FoldChange <= -1)
-down.data <- down.data[-grep("RP", down.data$gene_name),]
+up.data <- results[grep("CDKN2A$|GLI2$|MKI67IP$|CLASP1$", results$gene_name),]
+down.data <- results[grep("NBL1|HEY1|TBX5", results$gene_name),]
+down.data <- down.data[-c(4:6), ]
 
 ggplot(results, aes(x=log2FoldChange, y = -log10(pvalue))) +
   geom_point(aes(color = color), size = 1) +
@@ -321,12 +320,12 @@ ggplot(results, aes(x=log2FoldChange, y = -log10(pvalue))) +
                   nudge_x = -0.75,
                   direction = "y",
                   fontface = "bold",
-                  size = 2) +
+                  size = 4) +
   geom_text_repel(data = up.data,
                   aes(label = paste0(gene_name)) ,
                   hjust = -.35,
                   nudge_x = 0.5,
                   direction = "y",
                   fontface = "bold",
-                  size = 2)
-ggsave(paste0("/omics/groups/OE0540/internal/projects/przybilm/medulloblastoma/revision/scrna_analysis/bulkRNA_multiVariate_TCC_GROUP_volcano_wo_Immune.pdf"), width = 8, height = 6, dpi = 600)
+                  size = 4)
+ggsave(paste0("/omics/groups/OE0540/internal/projects/przybilm/medulloblastoma/revision/scrna_analysis/bulkRNA_multiVariate_TCC_GROUP_volcano_wo_Immune.pdf"), width = 9, height = 8, dpi = 600)
