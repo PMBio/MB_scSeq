@@ -1,0 +1,422 @@
+---
+title: "Plot Chr8 for Supplement"
+output: html_notebook
+---
+
+
+
+
+```{r}
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(CThripsos)
+library(matrixStats)
+library(ggplot2)
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", 8, sep = "_")
+
+```
+
+
+
+Lets start simple and just plot the bulk nicely. 
+
+
+```{r}
+
+# MB243
+# BulkTable_STP <- read.table(file = "/omics/odcf/analysis/OE0585_projects/chromothripsis/john/chromothripsis/results/external/XI046_ST_LFS_1/CNV/PDX/control-pdx-x_tumor_coverage.bins.tsv", stringsAsFactors = F, header = T)
+head(BulkTable_STP)
+
+orderedSTP<-c()
+for(i in c(1:22,"X","Y"))
+{
+  orderedSTP <- rbind(orderedSTP, BulkTable_STP[which(BulkTable_STP[,1]==i),])
+}
+
+BulkData<- orderedSTP[,6]
+
+bulk.data <- data.frame(bulk=BulkData, chr=BulkTable_STP[,1], coordinates=1:length(BulkData))
+bulk.data$order<-1:length(bulk.data$chr)
+
+bulk.data$start<-BulkTable_STP[,"start"]
+bulk.data$end<-BulkTable_STP[,"end"]
+
+colnames(bulk.data)[1]<-"Ploidy"
+
+```
+
+```{r}
+
+# ---------------------------------------------
+# Full genome bulk plot
+plotbulk<- ggplot(bulk.data, aes(coordinates, Ploidy)) +
+  ggrastr::rasterise(geom_point(aes(colour = Ploidy), size=0.5), dpi=300)+ ylim(-2,2) + 
+  scale_colour_gradient2(low = "darkblue", high = "darkred", mid ="darkgray", midpoint = 0)+
+  theme_bw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank(), panel.spacing.x=unit(0, "lines"), panel.border = element_rect(linetype =3),
+                   axis.title=element_text(size=16), axis.text=element_text(face="bold", size=12, colour = "black"), strip.text =element_text(size=14), panel.spacing=unit(.0001, "lines"), 
+                   strip.text.x = element_text(face="bold", size=12, colour = "black"),
+                   strip.text.y = element_text(face="bold", size=12, colour = "black"),
+                   strip.background = element_rect(fill="white", colour="black", size =1), 
+                   legend.title = element_text(size = 15),  legend.text =element_text(size = 13))+
+  facet_grid(.~reorder(chr,order), scales="free", space="free") + ggExtra::removeGrid() + labs(x="Genomic Coordinates", y="Bulk")+
+  scale_x_continuous(expand = c(0.01, 0.01))
+plotbulk
+
+# ggsave(file="/icgc/dkfzlsdf/analysis/B260/projects/Gonzalo/Meduloblastoma/ScriptsPaper/Fig2Data/bulk_log.png", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+# ggsave(file="/icgc/dkfzlsdf/analysis/B260/projects/Gonzalo/Meduloblastoma/ScriptsPaper/Fig2Data/bulk_log.svg", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+# ggsave(file="/icgc/dkfzlsdf/analysis/B260/projects/Gonzalo/Meduloblastoma/ScriptsPaper/Fig2Data/bulk_log.pdf", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+
+ggsave(file="/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/Figures_Paper/Figure2/bulk_log.png", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+# ggsave(file="/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/Figures_Paper/Figure2/bulk_log.svg", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+ggsave(file="/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/Figures_Paper/Figure2/bulk_log.pdf", plotbulk, width=83*2, height=20*2, dpi=300, units = "mm")
+
+
+```
+
+
+
+Load in the HMMCopy normalized read counts 
+
+
+```{r}
+
+ST1R_PDX_logR <- fread("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_hmmcopy_20kb_logR.csv")
+ST1R_logR <- fread("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_hmmcopy_20kb_logR.csv")
+
+
+ST1R_PDX_scAbs <- fread("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_scAbs_500kb_TCN.csv")
+
+ST1R <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-Nuclei/500/predict/out.rds")
+
+st1r_all <- assayData(ST1R)$copynumber
+
+st1r_all_8 <- st1r_all[grep("^8:", rownames(st1r_all)),]
+
+# SampleCellRes <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-PDX/500/predict/out.rds")
+
+ST1R_PDX_clones <- fread("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_cell_clone_assignments.csv", header=TRUE)
+
+```
+
+
+Candidate for the single cell: 
+GACTGCGAGCTTTGGT-1
+GTCTTCGAGCCCAATT
+
+Lets load in the HMMCopy data for this particular cell:
+
+```{r}
+library(HMMcopy)
+library(doParallel)
+
+## set sample of interest
+sample <- "ST1R-Nuclei"
+
+# set the paths of interest
+path_results <- "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/psmirnov_scratch/investigate_pseudobulking"
+dir.create(path_results)
+dir.create(paste0(path_results, "/", "results"))
+dir.create(paste0(path_results, "/", "figures"))
+
+## bin size param
+bin_kb <- 20
+bin <- bin_kb * 1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0(
+  "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/",
+  sample, "/readCount_filtered_bam/bin_", bin_kb, "kb/"
+)
+path_to_readcounts <- paste0(
+  "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/",
+  sample, "/readCount_filtered_bam/bin_", bin_kb, "kb/"
+)
+files <- list.files(path_to_readcounts, pattern = ".seg", full.names = F)
+
+# set the paths to the reference files
+gfile <- paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_", bin_kb, "kb/hg19.", bin_kb, "kb.gc.seg")
+mfile <- paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_", bin_kb, "kb/hg19.", bin_kb, "kb.map.seg")
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = c("GTCTTCGAGCCCAATT")) %dopar% {
+  print(paste0("Processing cell: ", cell))
+
+
+  rfile <- paste(path_cells, files[[cell]], sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData$reads <- 2*sqrt(cellData$reads + 3/8)
+  correctReadcount2(cellData)
+}
+names(cellList) <- c("GTCTTCGAGCCCAATT")
+
+plot(cellList[[1]]$copy[cellList[[1]]$chr=="8"])
+
+
+my.pars <- HMMsegment(cellList[[1]], getparam = TRUE)
+
+my.pars[2,"mu"] <- -1
+
+my.pars <- my.pars[1:5,]
+
+hmmres <- HMMsegment(cellList[[1]],  param=my.pars)
+hmmres$mu
+plotSegmentsAllChr(cellList[[1]], hmmres)
+plotSegments2(cellList[[1]], hmmres, "8")
+
+
+```
+
+Lets plot this single cell as a similar heatmap
+
+```{r}
+
+ST1R_single_cell <- cellList[[1]][cellList[[1]]$chr=="8",]
+
+ST1R_single_cell$value <- factor(hmmres$state[cellList[[1]]$chr == "8"] - 1)
+ST1R_single_cell
+ST1R_single_cell[, order := .I]
+melted <- ST1R_single_cell
+melted$Cells <- "GTCTTCGAGCCCAATT"
+pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(0,1,2,3,4,5,6,7,8)
+
+    melted$value <- melted$value
+    melted$Cells <- factor(melted$Cells)#, levels = clone.cells)
+    melted$clone = "Clone 1+2"
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- ggrastr::rasterise(ggplot(melted) + 
+      geom_tile(aes(x=order, y=Cells, fill=value)) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      # scale_fill_gradient2(name = "Copy Number", low = "#4393c3", high = "#b2182b", mid = "#ffffff", midpoint = 2)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chr,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir, "/ST1R_singlecell_chr8_segments.png")
+# png(file =fig.file, width = 13, height = 1, units = "in", res = 600)
+png(file = fig.file, width = 45, height = 5, unit = "in", res = 600)
+
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+Plot the heatmap for the ST1R PDX data
+
+```{r}
+
+st1r_all_8_reord <- st1r_all_8[,order(colVars(st1r_all_8[1:100,], na.rm = TRUE))]
+for(i in seq_len(nrow(st1r_all_8_reord))){
+  plot(st1r_all_8_reord[,i])
+  Sys.sleep(0.1)
+}
+```
+
+
+Lets try using the scAbs data instead of the hmmcopy data
+
+```{r}
+ST1R_PDX_scAbs[, `:=`(c("chr", "start", "end"), tstrsplit(ST1R_PDX_scAbs$V1, "[:-]"))]
+
+ST1R_PDX_scAbs[,order:=.I]
+
+ST1R_PDX_scAbs[,V1:=NULL]
+    clone_cells <- ST1R_PDX_clones[Clone%in%c("Clone_1", "Clone_2"), cells]
+    melted <-melt(ST1R_PDX_scAbs, id.vars = c("chr", "start", "end", "order"), variable.name="Cells")
+    melted <- melted[Cells %in% clone_cells]
+    # melted$value <- 2^(melted$value+1)
+    # d
+    midpoint <- 2
+    chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+    maxGain=8
+    minLoss=0
+    melted$value[melted$value>maxGain] <- maxGain
+    melted$value[melted$value<minLoss] <- minLoss
+    
+    # melted$order <- 1:length(melted$Chromosome)
+    
+    # set coulouring
+    # pcol <- c("#053061", "#3C8ABE", "#ffffff", "#F4AA88", "#EB9273", "#D6604D")
+    # pcol <- rev(c('#b2182b','#d6604d','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#92c5de','#4393c3','#2166ac'))
+    pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(0,1,2,3,4,5,6,7,8)
+
+    melted$value <- as.numeric(melted$value)
+    melted$Cells <- factor(melted$Cells)#, levels = clone.cells)
+    melted$clone = "Clone 1+2"
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- ggrastr::rasterise(ggplot(melted[chr=="8"]) + 
+      geom_tile(aes(x=order, y=Cells, fill=value)) +
+    #   scale_fill_stepsn(name = "Copy Number", colors = pcol, breaks=c(-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5))) +
+      scale_fill_gradient2(name = "Copy Number", low = "#4393c3", high = "#b2182b", mid = "#ffffff", midpoint = 2)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chr,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    pdf("1test.pdf")
+    p.all.cells2.b
+      dev.off()
+```
+
+
+
+
+```{r}
+
+ST1R_PDX_logR[,order:=.I]
+ST1R_PDX_logR[,V1:=NULL]
+    clone_cells <- ST1R_PDX_clones[Clone=="Clone_1", cells]
+    melted <-melt(ST1R_PDX_logR, id.vars = c("chr", "start", "end", "order"), variable.name="Cells")
+    melted <- melted[Cells %in% clone_cells]
+    melted$value <- 2^(melted$value+1)
+    # 
+    midpoint <- 2
+    chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+    maxGain=8
+    minLoss=0
+    melted$value[melted$value>maxGain] <- maxGain
+    melted$value[melted$value<minLoss] <- minLoss
+    
+    # melted$order <- 1:length(melted$Chromosome)
+    
+    # set coulouring
+    # pcol <- c("#053061", "#3C8ABE", "#ffffff", "#F4AA88", "#EB9273", "#D6604D")
+    # pcol <- rev(c('#b2182b','#d6604d','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#92c5de','#4393c3','#2166ac'))
+    pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5)
+
+    melted$value <- as.numeric(melted$value)
+    melted$Cells <- factor(melted$Cells)#, levels = clone.cells)
+    melted$clone = "Clone_1"
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- ggrastr::rasterise(ggplot(melted[chr=="8"]) + 
+      geom_tile(aes(x=order, y=Cells, fill=value)) +
+    #   scale_fill_stepsn(name = "Copy Number", colors = pcol, breaks=c(-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5))) +
+      scale_fill_gradient2(name = "Copy Number", low = "#4393c3", high = "#b2182b", mid = "#ffffff", midpoint = 2)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chr,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+
+    pdf(paste0(out.dir, "/ST1R_PDX_8_logR.pdf"))
+    print(p.all.cells2.b)
+      dev.off()
+```
+
+
+
+
+```{r}
+
+ST1R_logR[,order:=.I]
+ST1R_logR[,V1:=NULL]
+
+    melted <-melt(ST1R_logR, id.vars = c("chr", "start", "end", "order"), variable.name="Cells")
+
+    melted$value <- 2^(melted$value+1)
+    # 
+    midpoint <- 2
+    chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+    maxGain=8
+    minLoss=0
+    melted$value[melted$value>maxGain] <- maxGain
+    melted$value[melted$value<minLoss] <- minLoss
+    
+    # melted$order <- 1:length(melted$Chromosome)
+    
+    # set coulouring
+    # pcol <- c("#053061", "#3C8ABE", "#ffffff", "#F4AA88", "#EB9273", "#D6604D")
+    # pcol <- rev(c('#b2182b','#d6604d','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#92c5de','#4393c3','#2166ac'))
+    pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5)
+
+    melted$value <- as.numeric(melted$value)
+    melted$Cells <- factor(melted$Cells)#, levels = clone.cells)
+    melted$clone = "all"
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- ggrastr::rasterise(ggplot(melted[chr=="8"]) + 
+      geom_tile(aes(x=order, y=Cells, fill=value)) +
+      scale_fill_stepsn(name = "Copy Number", colors = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chr,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    pdf("1test.pdf")
+    p.all.cells2.b
+      dev.off()
+```

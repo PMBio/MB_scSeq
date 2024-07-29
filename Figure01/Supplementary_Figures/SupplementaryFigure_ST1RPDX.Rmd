@@ -1,0 +1,664 @@
+---
+title: "Supplemental Figure 1.1 - ST1R PDX"
+output:
+  html_document:
+    df_print: paged
+---
+This file is meant to create supplementary figure 1.4 for the revised manuscript. 
+
+```{r}
+rm(list=ls())
+set.seed(16011985) # set the seed of random number generator 
+
+
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(ggplot2)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+
+
+ct.threshold <- 8
+
+```
+
+Load in Moritz' functions:
+
+```{r}
+
+
+# package dependencies, which have to be installed are checked and installed if not available
+list.of.packages <- c("reshape2", "tidyverse", "readr", "BiocManager", "data.table", "gtools", "ggplot2", "dendextend", "ggpubr",
+                      "matrixStats", "ggrastr")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, repos = "http://cran.us.r-project.org")
+if(length(new.packages)) BiocManager::install(new.packages)
+
+# load functions
+source('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/figure_methods_stp_pdx/scripts/all_functions.R')
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+set.seed(29112019)
+
+# negate %in%
+"%ni%" <- Negate("%in%")
+
+chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", ct.threshold, sep = "_")
+if (!dir.exists(out.dir)) dir.create(out.dir)
+
+
+CNVchangeScale <- scale_fill_manual(name = "Subclonal Alteration Status", values = c(
+  "Not Altered" = "white",
+  "Clonal CNV" = "#33741a",
+  "Subclonal CNV" = "#6ba82f",
+  "Subclonal CT Event" = "#de77ae",
+  "Clonal CT Event" = "#d01c8b"
+))
+
+
+
+```
+
+Define some functions:
+
+```{r}
+
+############################################################################
+##                           FUNCTIONS
+############################################################################
+
+modify_clone_colors<-function(plot_mod, chrs_num)
+{
+  # Generate the ggplot2 plot grob
+  g <- grid.force(ggplotGrob(plot_mod))
+  # Get the names of grobs and their gPaths into a data.frame structure
+  grobs_df <- do.call(cbind.data.frame, grid.ls(g, print = FALSE))
+  # Build optimal gPaths that will be later used to identify grobs and edit them
+  grobs_df$gPath_full <- paste(grobs_df$gPath, grobs_df$name, sep = "::")
+  grobs_df$gPath_full <- gsub(pattern = "layout::", 
+                              replacement = "", 
+                              x = grobs_df$gPath_full, 
+                              fixed = TRUE)
+  
+  # Get the gPaths of the strip background grobs
+  strip_bg_gpath <- grobs_df$gPath_full[grepl(pattern = "strip\\.background.*", 
+                                              x = grobs_df$gPath_full)]
+  # Generate some color
+  fills <- RColorBrewer::brewer.pal(n = 7, name = "Set1")
+  aux<-fills[1]
+  fills[1]<-fills[3]
+  fills[3]<-aux
+  
+  for (i in (chrs_num+1):length(strip_bg_gpath)){
+    g <- editGrob(grob = g, gPath = strip_bg_gpath[i], gp = gpar(fill = fills[i-chrs_num]))
+  }
+  # Draw the edited plot
+  # grid.newpage(); grid.draw(g)
+  return(g)
+}
+
+
+
+################################################################################
+# FUNCTION TO NORMLIZE TO PlOIDY
+################################################################################
+### mat - DF that has bins as rows, clones/cells as columns. Row names should be of 
+###       format chr:star-end where chr can be of value 1-22, X, Y
+### normPloidy - what ploidy you want as default
+################################################################################
+normalizeToPloidy_version2 <- function(mat, normPloidy=2){
+  median_ploidy <- apply(mat,2,median)
+  names(median_ploidy) <- colnames(mat)
+  for(i in 1:ncol(mat)){
+    col_id <- colnames(mat)[i]
+    if(median_ploidy[col_id]!=normPloidy){
+      mat[,col_id] <- floor(mat[,col_id]*( normPloidy/max(1,median_ploidy[col_id]) ))
+    }
+  }
+  
+  return(mat)
+}
+
+normalizeToPloidy <- function(mat, normPloidy=2){
+  med.ploidy <- sapply(mat, function(x) median(x))
+  mult.factor <- normPloidy/med.ploidy
+  mult.factor[mult.factor>1] <- floor(mult.factor[mult.factor>1])
+  mat2<- apply(mat, 2, function(x) round( x* (if(normPloidy/median(x) > 1) floor(normPloidy/median(x)) else normPloidy/median(x)    ) ) )
+  
+  return(mat2)
+}
+
+
+```
+
+
+
+
+
+# Bulk
+
+First, lets plot the bulk data for this sample. We normalize it to ploidy 2, as per single cell results. We load in the single cell results just to get the coordinates from them
+(length of chromosomes, centromere bins, etc.)
+
+```{r}
+ST1RPDXCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1RPDX_clonal_cnv.rds")
+
+sc.coords <- ST1RPDXCloneRes[,.(chr, start, end)]
+sc.coords$end <- sc.coords$end-1
+
+
+```
+
+```{r}
+
+############################################################################
+##                VISUALISE THE BULK SEQUENCING DATA FOR ST1R-NUCLEI
+############################################################################
+
+# ST1R PDX
+BulkTable_ST1RPDX <-read.table(file = "/b06x-isilon/b06x-c/chromothripsis/results/external/XI046_ST_LFS_1/CNV/CNMops/control-pdx-x/XI046_ST_LFS_1_control-pdx-x_blood.bins.tsv", stringsAsFactors = F, header = T)
+# BulkTable_ST1RPDX[which(BulkTable_ST1RPDX[,1]=="X"),1]<-23
+# BulkTable_ST1RPDX[which(BulkTable_ST1RPDX[,1]=="Y"),1]<-24
+
+
+# BulkTable_ST1RPDX <- data.table(BulkTable_ST1RPDX)
+
+BulkTable_ST1RPDX <- merge(sc.coords,BulkTable_ST1RPDX, by.x = c("chr", "start", "end"), by.y = c("chr", "start", "end"), all.x = T)
+
+
+# Non aggregated data
+# order data per chromosome (it was alphabetically ordered in the stored data)
+orderedST1RPDX<-c()
+for(i in c(1:22, "X", "Y")){orderedST1RPDX <- rbind(orderedST1RPDX, BulkTable_ST1RPDX[which(BulkTable_ST1RPDX[,1]==i),])}
+
+## Map the bulk onto common coordinates as the single cell data
+
+
+
+
+
+
+# we calculate the tumor to control ratio
+BulkData <- orderedST1RPDX[,4]/orderedST1RPDX[,5]
+# plot(2**(log2(BulkData)) * 2, pch=16)
+
+xy<-which(orderedST1RPDX[,1]=="X" | orderedST1RPDX[,1]=="Y")
+notxy<-which(!(orderedST1RPDX[,1]=="X" | orderedST1RPDX[,1]=="Y"))
+
+# we transfor the ratio to absolute CNVs
+BulkData[notxy] <- 2**(log2(BulkData[notxy])) * 2
+BulkData[xy]<- 2**(log2(BulkData[xy])) * 1
+
+# wrangle into shape and rename
+bulk.data <- data.frame(bulk=BulkData[[1]], chr=orderedST1RPDX[,1], coordinates=1:nrow(orderedST1RPDX))
+bulk.data$bulk[which(bulk.data$bulk>8)]=8
+bulk.data$order<-1:length(bulk.data$chr)
+# bulk.data$chr[which(bulk.data$chr==23)]="X"
+# bulk.data$chr[which(bulk.data$chr==24)]="Y"
+
+# visualise Figure1A Bulk
+plotbulk <- ggplot(bulk.data, aes(coordinates, bulk)) +
+  geom_point(aes(colour = bulk))+
+  scale_colour_gradient2(low = "darkblue", high = "darkred", mid ="darkgray", midpoint = (2))+
+  theme_bw()+theme(axis.text=element_text(face="bold", size=12, colour = "black"), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      axis.ticks.x = element_blank(), axis.text.x = element_blank(), panel.spacing.x=unit(0, "lines"), panel.border = element_rect(linetype =3), legend.position = "none", strip.background = element_blank(), 
+      strip.text = element_blank()
+      )+
+  facet_grid(.~reorder(chr,order), scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="")+
+  scale_x_continuous(expand = c(0.01, 0.01))
+# plotbulk
+ggsave(file=file.path(out.dir,"ST1R_PDX_Bulk.png"), plot=plotbulk, width=160*4, height=25*2, dpi=300, units = "mm")
+
+plotbulk <- plotbulk + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+
+ggsave(file = file.path(out.dir,"ST1R_PDX_Bulk_noaxis.png"), plot = plotbulk, width = 160 * 4, height = 25 * 2, dpi = 300, units = "mm")
+
+
+```
+
+# Cells and Clones
+
+
+```{r}
+
+# ST1RNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STP-PDX/500/predict/out.rds")
+# STPRPDXres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-PDX/500/predict/out.rds")
+SampleCellRes <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-PDX/500/predict/out.rds")
+protocolData(SampleCellRes) <- AnnotatedDataFrame()
+colnames(SampleCellRes) <- gsub(colnames(SampleCellRes), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+SampleNucCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/st1r_pdx_boot_res.rds")
+
+SampleCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1RPDX_clonal_cnv.rds")
+
+SampleCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_",ct.threshold,"_2.rds"))
+# ST1RNucCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_8_2.rds")
+
+# colnames(SampleCloneRes)[length(colnames(SampleCloneRes))] <- "Normal"
+
+
+sample.tmp <- "ST1R-PDX"
+
+
+
+```
+
+
+
+
+Outputting statistics for the supplementary table:
+
+```{r}
+SampleCloneList <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_cell_clone_assignments.csv", header=TRUE)
+
+print(paste0('Cells Before QC: ',
+ncol(SampleCellRes)))
+
+print(paste0('Cells After QC: ',
+SampleCloneList[,.N]
+))
+
+print(paste0('Cells Assigned to Clone: ',
+SampleCloneList[Clone!='Not Assigned',.N]
+))
+
+```
+
+
+Now we need subset to the cells belonging to a particular clone.
+
+According the the f-stat, we select k=6 for the ploidy 2 state. 
+The other states have too few cells to form a clone. 
+
+
+
+```{r}
+
+ploidy2ClonesBoot <- SampleNucCloneBoot$Ploidy_2$k_3[sapply(SampleNucCloneBoot$Ploidy_2$k_3, length)>2]
+
+temp <- sapply(ploidy2ClonesBoot, `[[`, "cells")
+
+cellCloneDT <- data.table(data.frame(Cell=unlist(temp), Clone=rep(names(temp), times=sapply(temp, length))))
+
+cellCloneDT[,Clone:=paste0("Clone_", .GRP), Clone]
+
+
+clones <- cellCloneDT[,unique(Clone)]
+
+SingleCellCopynumberMat <- assayDataElement(SampleCellRes, "copynumber")
+
+
+```
+
+
+
+
+```{r, cache=TRUE}
+
+
+cur.boot.res <- SampleNucCloneBoot$Ploidy_2$k_3
+
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+
+cluster.boot.ct.res.chr <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(SampleCloneRes$chr, ":", SampleCloneRes$start, "-", SampleCloneRes
+                                     $end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, ct.threshold, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+names(cluster.boot.ct.res.chr) <- clones
+
+
+```
+
+
+
+
+```{r}
+
+for (clone.tmp in clones){
+    
+    # get the clone
+    clone.cells <- cellCloneDT[Clone==clone.tmp, Cell]
+    print(paste("Processing clone", clone.tmp))
+    cells.mat <- SingleCellCopynumberMat[,clone.cells ]
+    
+    # 
+    # midpoint <- 4
+    chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+    maxGain=8
+    minLoss=0
+    cells.mat[cells.mat>maxGain] <- maxGain
+    cells.mat[cells.mat<minLoss] <- minLoss
+    
+    
+    melted <-reshape2::melt(as.matrix(cells.mat), varnames=c('Chromosome', 'Cells'), as.is=T)
+    melted$chrXY <- sapply(strsplit(melted$Chromosome, ':'), '[[',1)
+    melted$chrXY <- factor(melted$chrXY, levels = chromosomes)
+    melted$start <- sapply(strsplit(sapply(strsplit(melted$Chromosome, '-'), '[[',1), ':'), '[[',2)
+    melted$end <- sapply(strsplit(melted$Chromosome, '-'), '[[',2)
+    melted$order <- 1:length(melted$Chromosome)
+    
+    # set coulouring
+    # pcol <- c("#053061", "#3C8ABE", "#ffffff", "#F4AA88", "#EB9273", "#D6604D")
+    # pcol <- rev(c('#b2182b','#d6604d','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#92c5de','#4393c3','#2166ac'))
+    pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(0, 1, 2, 3, 4, 5, 6, 7, 8)
+    
+    # set cluster name
+    melted$community <- clone.tmp
+    melted$community <- as.character(melted$community)
+    melted$clone <- melted$community
+    melted$value <- as.numeric(melted$value)
+    melted$Cells <- factor(melted$Cells, levels = clone.cells)
+    
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- (ggplot(melted) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.y = element_blank())#+theme(legend.position="none")
+    
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.heatmap.withchrlabels.pdf')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    # if(clone.tmp != "Clone_1"){
+      p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    # }
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.heatmap.png')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.nolegend.png')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    ############################################################################
+    ##      PLOT CHR8 for this clone
+    ############################################################################
+    
+
+
+    p.all.cells2.b <- (ggplot(melted[melted$chrXY=="8",]) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.y = element_blank())#+theme(legend.position="none")
+    
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_chr8.heatmap.withchrlabels.pdf')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    # if(clone.tmp != "Clone_1"){
+      p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    # }
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_chr8.heatmap.png")
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_chr8.nolegend.png")
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    ############################################################################
+    ##      PLOT THE CLONAL PROFILE FOR THIS CLONE
+    ############################################################################
+    
+    print('Plotting clonal heatmap.')
+
+    melted.clone <- data.frame(SampleCloneRes[,c("chr", "start","end",clone.tmp), with=FALSE])
+    colnames(melted.clone)[4] <- "value"
+    melted.clone$chrXY <- melted.clone$chr
+    melted.clone$chrXY <- factor(melted.clone$chrXY, levels = chromosomes)
+    melted.clone$order <- 1:length(melted.clone$chrXY)
+    
+    melted.clone$community <- clone.tmp
+    melted.clone$community <- as.character(melted.clone$community)
+    # melted.clone$clone <- paste0("C", melted.clone$community)
+    melted.clone$clone <- clone.tmp
+    melted.clone$value <- as.numeric(melted.clone$value)
+    melted.clone$Chromosome <- paste0(melted.clone$chr, ":", melted.clone$start, "-", melted.clone$end)
+    melted.clone$Cells <- clone.tmp
+    
+    p.all.cells2.b<- (ggplot(melted.clone) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=0, colour = "black",),
+            strip.text.y = element_text(face="bold", size=0, colour = "black"),
+            strip.background = element_blank(),
+            # strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted.clone$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_clone_pseudobulk.heatmap.png')
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_clone_pseudobulk.heatmap.nolegend.png')
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    ############################################################################
+    ##      PLOT CHR8 for this clone
+    ############################################################################
+    
+    p.all.cells2.b<- (ggplot(melted.clone[melted.clone$chrXY=="8",]) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=0, colour = "black",),
+            strip.text.y = element_text(face="bold", size=0, colour = "black"),
+            strip.background = element_blank(),
+            # strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted.clone$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_clone_pseudobulk_chr8.heatmap.png')
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_pseudobulk_chr8.heatmap.nolegend.png")
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    ############################################################################
+    ##      CT Score Track 
+    ############################################################################
+    
+    
+    curCloneCTScore <- t(SampleCTScores$CTData$CT_CellsBins[clone.tmp,, drop=FALSE])
+    
+    melted.CTscore <-reshape2::melt(as.matrix(curCloneCTScore), varnames=c('Chromosome', 'Cells'), as.is=T)
+    melted.CTscore$chrXY <- sapply(strsplit(melted.CTscore$Chromosome, ':'), '[[',1)
+    melted.CTscore$chrXY <- factor(melted.CTscore$chrXY, levels = chromosomes)
+    melted.CTscore$start <- sapply(strsplit(sapply(strsplit(melted.CTscore$Chromosome, '-'), '[[',1), ':'), '[[',2)
+    melted.CTscore$end <- sapply(strsplit(melted.CTscore$Chromosome, '-'), '[[',2)
+    melted.CTscore$order <- 1:length(melted.CTscore$Chromosome)
+    
+    melted.CTscore$community <- clone.tmp
+    melted.CTscore$community <- as.character(melted.CTscore$community)
+    melted.CTscore$clone <- melted.CTscore$community
+    melted.CTscore$value <- as.numeric(melted.CTscore$value)
+    melted.CTscore$Cells <- melted.CTscore$community
+    melted.CTscore$`CT Score` <- melted.CTscore$value
+    
+
+    melted.CTscore <- data.table(melted.CTscore)
+
+    melted.CTscore$start <- as.numeric(melted.CTscore$start)
+    melted.CTscore$end <- as.numeric(melted.CTscore$end)
+
+    CTlocs <- melted.CTscore[value>0, .(start = min(start), mid=mean(c(min(start), max(end))), end=max(end)), chrXY]
+
+    CTscorePoint <- melt(SampleCTScores$CTData$CT_CellsChrs[clone.tmp, , drop = FALSE])
+    colnames(CTscorePoint) <- c("Clone","chrXY", "CT")
+    CTlocs <- merge(CTlocs, CTscorePoint, by="chrXY")
+
+
+    resample <- data.table(melt(cluster.boot.ct.res.chr[[clone.tmp]]))
+    colnames(resample) <- c("sample", "chrXY", "CTres") 
+    resample2 <- resample[,.(lower=quantile(CTres, 0.25), upper=quantile(CTres, 0.75)), chrXY]
+    resample2 <- merge(resample2, merge(resample, resample2)[, .(lower_whisk = min(c(CTres[CTres > (lower - (upper - lower) * 1.5)], lower)), upper_whisk = max(c(CTres[CTres < (upper + (upper - lower) * 1.5)], upper))), chrXY])
+    test4 <- merge(CTlocs, resample2)
+    resample <- merge(CTlocs, resample)
+
+    print("Plotting CT boxplots.\n")
+
+
+    p.all.CT.box <- ggplot(melted.CTscore, aes(start, y=0)) + geom_point(alpha=0) + # the invisible points are required since scale=free
+      geom_rect(data = test4, mapping = aes(xmin=start, xmax=end, ymin=lower, ymax=upper, group = chrXY), 
+                fill="gray50", color="black", linewidth=2.5) + 
+      geom_segment(data = test4, aes(x = mid, xend=mid, y=lower, yend=lower_whisk)) + 
+      geom_segment(data = test4, aes(x = mid, xend=mid, y=upper, yend=upper_whisk)) + 
+      geom_segment(data = test4, aes(x = start, xend=end, y=CT, yend=CT), color="red", lwd=2.5) + 
+      # geom_point(data=resample, aes(x=mid, y=CTres), position=position_jitter(width=3e7)) +
+      facet_grid(~chrXY, scales = "free", space = "free") +
+        theme(
+          axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+          axis.text.y = element_text(size=64),
+          # axis.ticks.y = element_blank(), 
+          panel.spacing = unit(.0001, "lines"),
+          panel.background = element_rect(fill = "white"),
+          panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+          strip.text.x = element_text(face = "bold", size = 0, colour = "black", ),
+          strip.text.y = element_text(face = "bold", size = 0, colour = "black"),
+          strip.background = element_blank(),
+          # strip.background = element_rect(fill="white", colour="black", size =1),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.line = element_blank(), strip.text = element_text(size = 18),
+          plot.margin = margin(1, 0.5, 0.5, 0.5, "cm")
+        ) + labs(x="", y="") + ylim(c(0,1)) +
+        NULL
+
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_boxplot_withyaxis.png")
+    png(file = fig.file, width = 45, height = 5.5, unit="in", res=600)
+    print(p.all.CT.box)
+    dev.off()
+
+    p.all.CT.box <- p.all.CT.box + theme(axis.text.y=element_blank())
+
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_boxplot_noyaxis.png")
+    png(file = fig.file, width = 45, height = 5.5, unit="in", res=600)
+    print(p.all.CT.box)
+    dev.off()
+
+
+    # p.all.CT.box <- p.all.CT.box + theme(legend.position = "none")
+
+    # fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_boxplot.nolegend.pdf")
+    # pdf(file = fig.file, width = 45, height = 2.5)
+    # print(p.all.CT.box)
+    # dev.off()
+
+
+
+}
+
+
+```
+

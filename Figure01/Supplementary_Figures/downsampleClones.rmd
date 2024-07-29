@@ -1,0 +1,1454 @@
+---
+title: "Downsampling Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+
+
+```{r}
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(CThripsos)
+library(ggplot2)
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+```
+
+
+
+
+```{r}
+
+
+createMyPar <- function(QDNASeq, cells, HMMCopyCellList){
+
+    QDNASeq <- QDNASeq[,cells]
+    HMMCopyCellList <- HMMCopyCellList[cells]
+
+    clone.ploidy = mean(QDNASeq$ploidy)
+
+    ## Make the pseudobulk object
+    pseudobulk <- HMMCopyCellList[[1]][, 1:6]
+    for (i in seq_along(HMMCopyCellList)) {
+        if (i == 1) next
+        pseudobulk$reads <- pseudobulk$reads + HMMCopyCellList[[i]]$reads
+    }
+
+    pseudobulk <- pseudobulk[order(factor(chr, levels = mixedsort(unique(chr))), start)]
+    pseudobulk <- correctReadcount2(pseudobulk, verbose = FALSE)
+
+    def.par <- HMMsegment(pseudobulk, getparam = T)
+
+
+    ## Get the available copy number states at the estimated ploidy:
+    proptableOfStates <- prop.table(table(log2(assayData(QDNASeq)$copynumber / clone.ploidy)))
+    availableStates <- as.numeric(names(proptableOfStates))
+    my.par <- def.par[rep(1, length(availableStates)), ]
+    my.par$mu <- availableStates
+
+    my.par <- my.par[order(my.par$mu), ]
+    my.par[my.par$mu == 0, ] <- def.par[which.min(abs(def.par$mu)), ]
+
+    my.par$eta <- 0
+    my.par$m <- my.par$mu
+    my.par$e <- 0.999999999999999
+    my.par$strength <- 1e+50
+
+    if (any(my.par$m == -Inf)) {
+        my.par$eta[my.par$mu == -Inf] <- 5
+        if (min(availableStates[is.finite(availableStates)]) < 0) {
+            my.par$mu[my.par$mu == -Inf] <- my.par$m[my.par$m == -Inf] <- min(availableStates[is.finite(availableStates)]) * 3
+        } else {
+            my.par$mu[my.par$mu == -Inf] <- my.par$m[my.par$m == -Inf] <- min(pseudobulk$copy, na.rm = TRUE)
+        }
+    }
+
+    rownames(my.par) <- sort(round(2^(my.par$mu) * clone.ploidy))
+
+    return(my.par)
+
+}
+
+
+
+downsampleClone <- function(cells, HMMCopyCellList, QDNAseq, numCells = c(3,4,5,6,10,15,20), nrep = 101){
+
+    HMMCopyCellList <- HMMCopyCellList[cells]
+
+    require(R.utils)
+    message("Downsampling")
+    bootResList <- list()
+    # pb <- R.utils::ProgressBar(max=nBoot)
+    # R.utils::reset(pb)
+    my.par <- createMyPar(QDNAseq, cells, HMMCopyCellList)
+
+    qtres <- foreach(nC = numCells) %do% {
+        bootResList <- foreach(jj = seq_len(nrep)) %dopar% {
+            if(nC > length(HMMCopyCellList)){
+              return(list("sampled_cells" = "Not enough cells in clone", hmmcopy.res = NA))
+            }
+            boot.sample <- sample(length(HMMCopyCellList), size = nC, replace = FALSE)
+            pseudobulk <- HMMCopyCellList[[1]][, 1:6]
+            for (i in boot.sample) {
+                if (i == 1) next
+                pseudobulk$reads <- pseudobulk$reads + HMMCopyCellList[[i]]$reads
+            }
+            pseudobulk <- pseudobulk[order(factor(chr, levels = mixedsort(unique(chr))), start)]
+            pseudobulk <- correctReadcount2(pseudobulk, verbose = FALSE)
+            pseudobulk.hmmres <- HMMsegment(pseudobulk, param = my.par, verbose = FALSE)
+            pseudobulk.hmmres$rho <- matrix()
+            return(list("sampled_cells" = boot.sample, hmmcopy.res = pseudobulk.hmmres))
+            # R.utils::increase(pb)
+        }
+    }
+    names(qtres) <- numCells
+    return(qtres)
+}
+
+
+```
+
+
+```{r}
+computeDownsampledCT <- function(downsample_res, cellList, nchanges=10) {
+    res <- lapply(downsample_res, function(y) {
+        if(length(y[[1]]$sampled_cells) == 1 && y[[1]]$sampled_cells == "Not enough cells in clone"){
+          return(NA)
+        }
+        cur.boot.cells <- sapply(y, \(x) return(x$hmmcopy.res$state))
+        cellCoords <- cellList[[1]]
+        cellCoords <- cellCoords[order(factor(chr, levels = mixedsort(unique(chr))), start),]
+
+        
+        rownames(cur.boot.cells) <- paste0(cellCoords$chr, ":", cellCoords$start, "-", cellCoords$end)
+
+
+        test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+        ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, nchanges, 2)
+        ct.out$CTData$CT_CellsChrs
+    })
+    names(res) <- names(downsample_res)
+    res <- res[!sapply(res, length)==1]
+    return(res)
+}
+
+
+```
+
+
+
+# STP Nuclei
+
+
+```{r}
+
+
+STPNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STP-Nuclei-2/1000/predict/out.rds")
+protocolData(STPNucres) <- AnnotatedDataFrame()
+colnames(STPNucres) <- gsub(colnames(STPNucres), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(STPNucres$observed.variance / STPNucres$expected.variance) * 2 + median(STPNucres$observed.variance / STPNucres$expected.variance) > STPNucres$observed.variance / STPNucres$expected.variance
+gini.filter <- mad(STPNucres$gini_normalized) * 2 + median(STPNucres$gini_normalized) > STPNucres$gini_normalized
+# error.filter <- mad(STPNucres$error)*2+median(STPNucres$error) > STPNucres$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- STPNucres$ploidy.mod > 0
+STPNucres <- STPNucres[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc2_1MB_boot_res.rds")
+```
+
+
+For this sample, k=10 was used for ploidy 4, and k=4 for ploidy 2.
+
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'STP-Nuclei'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(STPNucres)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(STPNucres)
+
+
+
+```
+
+
+
+
+```{r}
+
+registerDoParallel(10)
+# 
+# cellnames <- clonal.cnv.res.boot$Ploidy_4$k_10[[1]]$cells
+# 
+# downsample_res <- downsampleClone(cellnames, cellList, STPNucres)
+
+```
+
+
+```{r}
+
+
+STPNucClones <- clonal.cnv.res.boot$Ploidy_4$k_10
+
+STPNucClones <- STPNucClones[sapply(STPNucClones, length)>2]
+
+sample <- 'STP-Nuclei'
+
+for(clone_i in seq_along(STPNucClones)){
+
+    cur_clone <- STPNucClones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, STPNucres)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+
+```{r}
+
+
+
+for(clone_i in seq_along(STPNucClones)){
+
+    dCT.m <- read.csv(paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+
+  
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+
+```
+
+
+
+# STP-PDX
+
+
+
+```{r}
+
+
+STPPDXres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STP-PDX/500/predict/out.rds")
+protocolData(STPPDXres) <- AnnotatedDataFrame()
+colnames(STPPDXres) <- gsub(colnames(STPPDXres), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(STPPDXres$observed.variance / STPPDXres$expected.variance) * 2 + median(STPPDXres$observed.variance / STPPDXres$expected.variance) > STPPDXres$observed.variance / STPPDXres$expected.variance
+gini.filter <- mad(STPPDXres$gini_normalized) * 2 + median(STPPDXres$gini_normalized) > STPPDXres$gini_normalized
+# error.filter <- mad(STPPDXres$error)*2+median(STPPDXres$error) > STPPDXres$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- STPPDXres$ploidy.mod > 0
+STPPDXres <- STPPDXres[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP-PDX_boot_res.rds")
+```
+
+
+For this sample, k=5 was used for ploidy 4. 
+
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'STP-PDX'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(STPPDXres)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(STPPDXres)
+
+
+
+```
+
+
+```{r}
+registerDoParallel(10)
+
+STPPDXClones <- clonal.cnv.res.boot$Ploidy_4$k_5
+
+STPPDXClones <- STPPDXClones[sapply(STPPDXClones, length)>2]
+
+sample <- 'STP-PDX'
+
+for(clone_i in seq_along(STPPDXClones)){
+
+    cur_clone <- STPPDXClones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, STPPDXres)
+
+    
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+# MB243
+
+
+```{r}
+
+
+MB243 <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/MB243-Nuclei/500/predict/out.rds")
+protocolData(MB243) <- AnnotatedDataFrame()
+colnames(MB243) <- gsub(colnames(MB243), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(MB243$observed.variance / MB243$expected.variance) * 2 + median(MB243$observed.variance / MB243$expected.variance) > MB243$observed.variance / MB243$expected.variance
+gini.filter <- mad(MB243$gini_normalized) * 2 + median(MB243$gini_normalized) > MB243$gini_normalized
+# error.filter <- mad(MB243$error)*2+median(MB243$error) > MB243$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- MB243$ploidy.mod > 0
+MB243 <- MB243[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("mb243_boot_res_ploidyfixed.rds")
+```
+
+
+
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'MB243-Nuclei'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(MB243)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(MB243)
+
+
+
+```
+For this sample, Ploidy 3 clones at k=1 and Ploidy 4 clones at k=8 were included. 
+
+
+
+```{r}
+registerDoParallel(10)
+
+MB243Clones <- clonal.cnv.res.boot$Ploidy_4$k_8
+
+MB243Clones <- MB243Clones[sapply(MB243Clones, length)>2]
+
+sample <- 'MB243_Ploidy4'
+
+for(clone_i in seq_along(MB243Clones)){
+
+    cur_clone <- MB243Clones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, MB243)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+```{r}
+registerDoParallel(10)
+
+MB243Clones <- clonal.cnv.res.boot$Ploidy_3$k_1
+
+MB243Clones <- MB243Clones[sapply(MB243Clones, length)>2]
+
+sample <- 'MB243_Ploidy3'
+
+for(clone_i in seq_along(MB243Clones)){
+
+    cur_clone <- MB243Clones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, MB243)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,2)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,2)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,2)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+# ST1R-PDX
+
+
+```{r}
+
+
+ST1RPDX <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-PDX/500/predict/out.rds")
+protocolData(ST1RPDX) <- AnnotatedDataFrame()
+colnames(ST1RPDX) <- gsub(colnames(ST1RPDX), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(ST1RPDX$observed.variance / ST1RPDX$expected.variance) * 2 + median(ST1RPDX$observed.variance / ST1RPDX$expected.variance) > ST1RPDX$observed.variance / ST1RPDX$expected.variance
+gini.filter <- mad(ST1RPDX$gini_normalized) * 2 + median(ST1RPDX$gini_normalized) > ST1RPDX$gini_normalized
+# error.filter <- mad(ST1RPDX$error)*2+median(ST1RPDX$error) > ST1RPDX$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- ST1RPDX$ploidy.mod > 0
+ST1RPDX <- ST1RPDX[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("st1r_pdx_boot_res.rds")
+```
+
+
+
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'ST1R-PDX'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(ST1RPDX)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(ST1RPDX)
+
+
+
+```
+For this sample, Ploidy 3 clones at k=1 and Ploidy 4 clones at k=8 were included. 
+
+
+
+```{r}
+registerDoParallel(10)
+
+ST1RPDXClones <- clonal.cnv.res.boot$Ploidy_2$k_3
+
+ST1RPDXClones <- ST1RPDXClones[sapply(ST1RPDXClones, length)>2]
+
+sample <- 'ST1RPDX'
+
+for(clone_i in seq_along(ST1RPDXClones)){
+
+    cur_clone <- ST1RPDXClones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, ST1RPDX)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+
+
+
+# Downsample Pellman's Clone2a data
+
+
+
+
+
+```{r}
+
+
+Clone2a <- readRDS("/home/p163v/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale//pellmann_rpe1_BR_CL_170825_S2_F9_CNV/500/predict/out.rds")
+protocolData(Clone2a) <- AnnotatedDataFrame()
+colnames(Clone2a) <- gsub(colnames(Clone2a), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(Clone2a$observed.variance / Clone2a$expected.variance) * 2 + median(Clone2a$observed.variance / Clone2a$expected.variance) > Clone2a$observed.variance / Clone2a$expected.variance
+gini.filter <- mad(Clone2a$gini_normalized) * 2 + median(Clone2a$gini_normalized) > Clone2a$gini_normalized
+# error.filter <- mad(Clone2a$error)*2+median(Clone2a$error) > Clone2a$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- Clone2a$ploidy.mod > 0
+Clone2a <- Clone2a[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("BR_CL_170825_S2_F9_CNV_boot_res.rds")
+
+```
+
+
+For this sample, k=4 was used, and we are only interested in Clone 3
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'BR_CL_170825_S2_F9_CNV'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|\\."), `[[`, 5)
+
+cellList <- foreach(cell = colnames(Clone2a)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(Clone2a)
+
+
+
+```
+
+
+
+
+```{r}
+
+registerDoParallel(10)
+# 
+# cellnames <- clonal.cnv.res.boot$Ploidy_4$k_10[[1]]$cells
+# 
+# downsample_res <- downsampleClone(cellnames, cellList, STPNucres)
+
+```
+
+
+```{r}
+
+
+Clone2aClones <- clonal.cnv.res.boot$Ploidy_2$k_5
+
+Clone2aClones <- Clone2aClones[sapply(Clone2aClones, length)>2]
+
+sample <- 'BR_CL_170825_S2_F9_CNV'
+
+# for(clone_i in seq_along(Clone2aClones)){
+for(clone_i in seq_along(Clone2aClones)){
+
+    cur_clone <- Clone2aClones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, Clone2a)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+
+```{r}
+
+
+
+for(clone_i in seq_along(STPNucClones)){
+
+    dCT.m <- read.csv(paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+
+  
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells, levels=c(3,4,5,6,10,15,20)), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+
+```
+
+
+
+
+# Pelmann S2_F2 data
+
+
+
+
+
+```{r}
+
+
+Clone1b <- readRDS("/home/p163v/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale//pellmann_rpe1_BR_CL_170825_S2_F2_CNV/500/predict/out.rds")
+protocolData(Clone1b) <- AnnotatedDataFrame()
+colnames(Clone1b) <- gsub(colnames(Clone1b), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+
+```
+
+Filter the noisy cells out:
+
+```{r}
+var.filter <- mad(Clone1b$observed.variance / Clone1b$expected.variance) * 2 + median(Clone1b$observed.variance / Clone1b$expected.variance) > Clone1b$observed.variance / Clone1b$expected.variance
+gini.filter <- mad(Clone1b$gini_normalized) * 2 + median(Clone1b$gini_normalized) > Clone1b$gini_normalized
+# error.filter <- mad(Clone1b$error)*2+median(Clone1b$error) > Clone1b$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- Clone1b$ploidy.mod > 0
+Clone1b <- Clone1b[, var.filter & gini.filter & ploidy.filter]
+
+```
+
+
+```{r}
+
+clonal.cnv.res.boot <- readRDS("BR_CL_170825_S2_F2_CNV_boot_res.rds")
+
+```
+
+
+For this sample, k=4 was used, and we are only interested in Clone 3
+
+We need to load in the HMMCopy per cell read counts:
+
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'BR_CL_170825_S2_F2_CNV'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|\\."), `[[`, 5)
+
+cellList <- foreach(cell = colnames(Clone1b)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  cellData
+#   correctReadcount2(cellData)
+  
+}
+names(cellList) <- colnames(Clone1b)
+
+
+
+```
+
+
+
+
+```{r}
+
+registerDoParallel(10)
+# 
+# cellnames <- clonal.cnv.res.boot$Ploidy_4$k_10[[1]]$cells
+# 
+# downsample_res <- downsampleClone(cellnames, cellList, STPNucres)
+
+```
+
+
+```{r}
+
+
+Clone1bClones <- clonal.cnv.res.boot$Ploidy_2$k_5
+
+Clone1bClones <- Clone1bClones[sapply(Clone1bClones, length)>2]
+
+sample <- 'BR_CL_170825_S2_F9_CNV'
+
+# for(clone_i in seq_along(Clone1bClones)){
+for(clone_i in seq_along(Clone1bClones)){
+
+    cur_clone <- Clone1bClones[[clone_i]]
+    cellnames <- cur_clone$cells
+
+    downsample_res <- downsampleClone(cellnames, cellList, Clone2a)
+
+    downsampleCT <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList)
+
+    dCT.m <- rbindlist(lapply(downsampleCT, reshape2::melt), idcol = "NumCells")
+    colnames(dCT.m)[2:4] <- c("Sample", "chr", "CT")
+    # dCT.m$NumCells <- ceiling(as.numeric(dCT.m$quantile )* length(cellnames))
+
+    downsampleCT8 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,8)
+    downsampleCT6 <- computeDownsampledCT(downsample_res = downsample_res, cellList = cellList,6)
+    dCT.m$CT8 <-  rbindlist(lapply(downsampleCT8, reshape2::melt), idcol = "NumCells")[[4]]
+    dCT.m$CT6 <-  rbindlist(lapply(downsampleCT6, reshape2::melt), idcol = "NumCells")[[4]]
+    
+    dCT.m$chr <- factor(dCT.m$chr, levels=c(1:22, 'X', 'Y'))
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct10.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct8.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT8)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_summary_ct6.pdf"),width=32)
+    p <- ggplot(dCT.m, aes(x=factor(NumCells), y=CT6)) + geom_boxplot() + facet_grid(~chr) + theme_bw() +theme(axis.text.x = element_text(size=6))
+    print(p)
+    dev.off()
+    
+    
+    
+    write.csv(dCT.m, file=paste0("results/CTdownsample_", sample, "_clone_", clone_i, ".csv"))
+    
+    # 
+    # for(chrom in unique(dCT.m$chr)){
+    #     if((dCT.m[chr==chrom,any(CT>0)])){
+    #     pdf(paste0("figures/CTdownsample_", sample, "_clone_", clone_i, "_chromosome_", chrom, ".pdf"))
+    #     boxplot(CT~NumCells, dCT.m)
+    #     dev.off()
+    #     }
+    # }
+
+
+
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
