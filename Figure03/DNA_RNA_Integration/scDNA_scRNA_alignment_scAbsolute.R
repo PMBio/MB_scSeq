@@ -32,7 +32,7 @@ suppressMessages(invisible(lapply(list.of.packages, require, character.only = TR
 "%ni%" <- Negate("%in%")
 
 # get the functions to perform the alignment
-source("infercnv/revision/scrna_analysis/scDNA_scRNA_alignment_functions.R")
+source("~/scDNASeq_natgen_notebooks/infercnv/revision/scrna_analysis/scDNA_scRNA_alignment_functions.R")
 debug(generate.random.clone.profile)
 # set sample id
 sample.tmp <- "MB243-Nuclei_clones"
@@ -42,7 +42,7 @@ sample.short <- "MB243-Nuclei"
 input.dir <- "/omics/groups/OE0540/internal/projects/przybilm/medulloblastoma/infercnv_MB/freeze"
 
 # specify the output directory
-out.dir <- "infercnv/infercnv_MB/scRNA_scDNA/"
+out.dir <- "~/scDNASeq_natgen_notebooks/infercnv/infercnv_MB/scRNA_scDNA/"
 dir.create(out.dir)
 
 # create a sample directory
