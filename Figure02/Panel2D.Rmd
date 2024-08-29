@@ -1,0 +1,414 @@
+---
+title: "Panel 2D"
+output:
+  html_document:
+    df_print: paged
+---
+This file is meant to create figure 2D for the revised manuscript. 
+
+```{r}
+rm(list=ls())
+set.seed(16011985) # set the seed of random number generator 
+
+
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(ggplot2)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+
+```
+
+Load in Moritz' functions:
+
+```{r}
+
+
+# package dependencies, which have to be installed are checked and installed if not available
+list.of.packages <- c("reshape2", "tidyverse", "readr", "BiocManager", "data.table", "gtools", "ggplot2", "dendextend", "ggpubr",
+                      "matrixStats", "ggrastr")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, repos = "http://cran.us.r-project.org")
+if(length(new.packages)) BiocManager::install(new.packages)
+
+# load functions
+source('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/figure_methods_stp_pdx/scripts/all_functions.R')
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+set.seed(29112019)
+
+# negate %in%
+"%ni%" <- Negate("%in%")
+
+chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+
+
+out.dir <- "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures"
+if (!dir.exists(out.dir)) dir.create(out.dir)
+
+
+
+```
+
+Define some functions:
+
+```{r}
+
+############################################################################
+##                           FUNCTIONS
+############################################################################
+
+modify_clone_colors<-function(plot_mod, chrs_num)
+{
+  # Generate the ggplot2 plot grob
+  g <- grid.force(ggplotGrob(plot_mod))
+  # Get the names of grobs and their gPaths into a data.frame structure
+  grobs_df <- do.call(cbind.data.frame, grid.ls(g, print = FALSE))
+  # Build optimal gPaths that will be later used to identify grobs and edit them
+  grobs_df$gPath_full <- paste(grobs_df$gPath, grobs_df$name, sep = "::")
+  grobs_df$gPath_full <- gsub(pattern = "layout::", 
+                              replacement = "", 
+                              x = grobs_df$gPath_full, 
+                              fixed = TRUE)
+  
+  # Get the gPaths of the strip background grobs
+  strip_bg_gpath <- grobs_df$gPath_full[grepl(pattern = "strip\\.background.*", 
+                                              x = grobs_df$gPath_full)]
+  # Generate some color
+  fills <- RColorBrewer::brewer.pal(n = 7, name = "Set1")
+  aux<-fills[1]
+  fills[1]<-fills[3]
+  fills[3]<-aux
+  
+  for (i in (chrs_num+1):length(strip_bg_gpath)){
+    g <- editGrob(grob = g, gPath = strip_bg_gpath[i], gp = gpar(fill = fills[i-chrs_num]))
+  }
+  # Draw the edited plot
+  # grid.newpage(); grid.draw(g)
+  return(g)
+}
+
+
+
+################################################################################
+# FUNCTION TO NORMLIZE TO PlOIDY
+################################################################################
+### mat - DF that has bins as rows, clones/cells as columns. Row names should be of 
+###       format chr:star-end where chr can be of value 1-22, X, Y
+### normPloidy - what ploidy you want as default
+################################################################################
+normalizeToPloidy_version2 <- function(mat, normPloidy=2){
+  median_ploidy <- apply(mat,2,median)
+  names(median_ploidy) <- colnames(mat)
+  for(i in 1:ncol(mat)){
+    col_id <- colnames(mat)[i]
+    if(median_ploidy[col_id]!=normPloidy){
+      mat[,col_id] <- floor(mat[,col_id]*( normPloidy/max(1,median_ploidy[col_id]) ))
+    }
+  }
+  
+  return(mat)
+}
+
+normalizeToPloidy <- function(mat, normPloidy=2){
+  med.ploidy <- sapply(mat, function(x) median(x))
+  mult.factor <- normPloidy/med.ploidy
+  mult.factor[mult.factor>1] <- floor(mult.factor[mult.factor>1])
+  mat2<- apply(mat, 2, function(x) round( x* (if(normPloidy/median(x) > 1) floor(normPloidy/median(x)) else normPloidy/median(x)    ) ) )
+  
+  return(mat2)
+}
+
+
+getAnnotations<-function(gene_name) {
+  ensembl <- biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
+  biomaRt::listAttributes(ensembl, page="feature_page")
+  
+  annot <- biomaRt::getBM(attributes=c("hgnc_symbol", "chromosome_name", "start_position", "end_position"), 
+                          filters = 'hgnc_symbol', 
+                          values = gene_name, 
+                          mart = ensembl)
+  
+  annot <- annot[which(annot[,"chromosome_name"] %in% c(1:22,"X","Y")),]
+  
+  unique_gene_ids<-which(!duplicated(annot[,"hgnc_symbol"]))
+  annot <-annot[unique_gene_ids, ]
+  rownames(annot) <-annot[,"hgnc_symbol"]
+  
+  return(annot)
+}
+
+
+DM_violin_comms<-function(gene_chr, gene_start, gene_end, segment_coords, segment_chromosomes, Segments_Matrix, Clusters) {
+  gene_segments<-c(which(as.numeric(segment_coords[,1]) <= gene_start & as.numeric(segment_coords[,2]) > gene_start & segment_chromosomes==gene_chr), which(as.numeric(segment_coords[,1]) < gene_end & as.numeric(segment_coords[,2]) >= gene_end & segment_chromosomes==gene_chr))
+  Matrix_DM<-Segments_Matrix[gene_segments,]
+  rownames(Segments_Matrix)[gene_segments]
+  
+  melted <-reshape2::melt(as.matrix(Matrix_DM), varnames=c('Chromosome', 'Cells'), as.is=T)
+  head(melted)
+  
+  # Generate some color
+  fills<-c("#4DAF4A", "#876D57", "#749dae","#f3c483" ,"#5c1a33")
+  
+  melted$chrXY <- unlist(lapply(strsplit(melted$Chromosome, ':'), '[[',1))
+  melted$start <-unlist(lapply((strsplit(unlist(lapply(strsplit(melted$Chromosome, '-'), '[[',1)), ':')), '[[',2))
+  melted$end <- unlist(lapply(strsplit(melted$Chromosome, '-'), '[[',2))
+  melted$community<-as.character(Clusters[melted$Cells, "cluster"])
+  melted$value <- as.numeric(melted$value)
+  
+  
+  cell_median_ploidy<-apply(as.matrix(Segments_Matrix), 2, median)
+  melted$cnv_corrected <- as.numeric(melted$value/cell_median_ploidy[melted$Cells])
+  melted$ploidy<-cell_median_ploidy[melted$Cells]
+  
+  colnames(melted)[3]="Copy-number"
+  colnames(melted)[7]="Clone"
+  
+  melted$Clone<-paste0("c",  melted$Clone)
+  
+  dodge <- position_dodge(width = 0.6)
+  dodge2<- position_dodge(width = 0.6)
+  
+  # my_comparisons<-list()
+  my_comparisons<-list(c("c1", "c2"), c("c1", "c3"), c("c1", "c4"),
+                       c("c2", "c3"), c("c2", "c4"),
+                       c("c3", "c4"))
+  # clones<-unique(melted$community)
+  # for(i in 2:length(clones))
+  # {
+  #   my_comparisons[[i-1]]<-c(clones[1], clones[i])
+  # }
+  
+  # p<-ggplot(melted, aes(x=Clone, y=`Copy-number`, color=Clone)) + 
+  #   geom_boxplot(outlier.size = NA, outlier.color = "black", notch = FALSE, width = 0.3)+
+  #   geom_jitter(size = 1, alpha = 0.5)+
+  #   scale_color_manual(values = scales::alpha(fills,1), "Clone")+
+  #   ggtitle(paste0(as.character(gene_chr), ":", as.character(gene_start), "-", as.character(gene_end))) + theme_classic() +
+  #   theme( axis.text=element_text(size=20), axis.title.y=element_text(size=20), legend.title = element_text(size=20), legend.text =element_text(size=20), axis.title.x = element_blank())  + labs(y="Ploidy")+
+  #   stat_compare_means(comparisons = my_comparisons, label = "p.signif", method = "t.test",  p.adjust.method = "bonferroni")
+  
+  
+  p <- ggplot(melted, aes(x=Clone, y=`Copy-number`, color = Clone, fill = Clone)) + 
+    geom_dotplot(binaxis='y', stackdir='center',
+                 stackratio=1.15, dotsize=0.75, color = "black") +
+    geom_violin(color = "black", width = 0.5, fill = "NA") +
+    scale_color_manual(values = scales::alpha(fills,1), "Clone")+
+    scale_fill_manual(values = scales::alpha(fills,1), "Clone") +
+    ggtitle(paste0(as.character(gene_chr), ":", as.character(gene_start), "-", as.character(gene_end))) +
+    theme_bw() + ylab("Copy Number") +
+    stat_compare_means(comparisons = my_comparisons, label = "p.signif", method = "t.test",  p.adjust.method = "bonferroni")
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 0.75),
+          strip.text = element_text(face="bold", size=6, colour = "black",),
+          strip.background = element_rect(fill="white", colour="black", size=1),
+          axis.text.x = element_text(color = "black", size = 6, angle = 0, hjust = .5, vjust = 0.5, face = "bold"),
+          axis.text.y = element_text(color = "black", size = 8, angle = 0, hjust = 1, vjust = 0, face = "bold"),  
+          axis.title.x = element_text(color = "black", size = 8, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+          axis.title.y = element_text(color = "black", size = 8, angle = 90, hjust = .5, vjust = .5, face = "bold", 
+                                      margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+          plot.title = element_text(color = "black", size = 12, hjust = .5, face = "bold"), 
+          legend.position = "none")
+  
+  return(p)
+}
+
+
+
+```
+
+
+# Figure 2D
+
+
+```{r}
+
+
+MB243CellRes <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/MB243-Nuclei/500/predict/out.rds")
+protocolData(MB243CellRes) <- AnnotatedDataFrame()
+colnames(MB243CellRes) <- gsub(colnames(MB243CellRes), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+# MB243CloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/mb243_boot_res.rds")
+
+MB243CloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_draft3_clonal_cnv.rds")
+
+MB243CTScores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_10_2.rds")
+
+MB243logR <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_hmmcopy_20kb_logR.csv")
+
+MB243cell2clone <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_cell_clone_assignments.csv", header=TRUE)
+
+MB243cell2clone <- MB243cell2clone[!Clone=="Not Assigned",]
+sample.tmp <- "MB243"
+
+
+```
+
+## Chr2 location first. 
+
+```{r}
+
+# We get the gene information
+gene_name <- "GLI2"
+annot <- getAnnotations(gene_name)
+gene_chr <- annot$chromosome_name
+gene_start <- annot$start_position
+gene_end <- annot$end_position
+
+```
+
+
+```{r}
+
+# We retrieve the bins that are contained in the GLI2 gene
+gene_endbins <- c(which(as.numeric(MB243logR[, start]) <= gene_start & as.numeric(MB243logR[, end]) > gene_start & MB243logR[, chr] == gene_chr), which(as.numeric(MB243logR[, start]) < gene_end & as.numeric(MB243logR[, end]) >= gene_end & MB243logR[,chr] == gene_chr))
+
+# , -c(1:4)])
+gli2_copy <- data.frame(MB243logR[gene_endbins[1]:gene_endbins[2], MB243cell2clone$cells, with = FALSE])
+
+for(clone in paste0("Clone_", 1:4)){
+    cur.cells <- MB243cell2clone[Clone == clone, cells]
+    if(clone=="Clone_1"){
+        gli2_copy[, cur.cells] <- 2^(gli2_copy[, cur.cells]) * 3
+    } else {
+        gli2_copy[, cur.cells] <- 2^gli2_copy[, cur.cells] * 4
+    }
+}
+
+cellNumSegments <- apply(assayData(MB243CellRes[,colnames(gli2_copy)])[["segmented"]][fData(MB243CellRes)$chr=="2",], 2, \(x) sum(diff(na.omit(x))!=0)+1)
+
+png("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/Fig2D_draft.png", width = 7, height = 6, unit="in", res=600)
+par(mar = c(5, 5, 4, 4))
+plot(colMeans(gli2_copy), cellNumSegments, pch=16, xlab="Cell CN - GLI2 Chr2", ylab="Number of CN Segments - Chr2", cex=1.5, main=sample.tmp, cex.lab=2)
+dev.off()
+
+
+```
+
+
+Lets plot this as a violin plot:
+
+```{r}
+library(ggplot2)
+toPlot <- data.frame('GLI2 Copy Number' = colMeans(gli2_copy), "Number of CN Segments - Chr2" = as.factor(cellNumSegments), check.names = FALSE)
+
+png("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/Fig2D_draft_violin.png", width = 3, height = 3, unit = "in", res = 600)
+ggplot(toPlot, aes(x = `Number of CN Segments - Chr2`, y = `GLI2 Copy Number`)) +
+  geom_violin(bw = 5,fill='gray80') + theme_classic() +
+  geom_point(position = position_jitter(width = .2, height = 0))
+dev.off()
+
+pdf("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/Fig2D_draft_violin.pdf", width = 3, height = 3)
+ggplot(toPlot, aes(x = `Number of CN Segments - Chr2`, y = `GLI2 Copy Number`)) +
+  geom_violin(bw = 5,fill='gray80') + theme_classic() +
+  geom_point(position = position_jitter(width = .2, height = 0))
+dev.off()
+
+
+svg("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/Fig2D_draft_violin.svg", width = 3, height = 3)
+ggplot(toPlot, aes(x = `Number of CN Segments - Chr2`, y = `GLI2 Copy Number`)) +
+  geom_violin(bw = 5,fill='gray80') + theme_classic() +
+  geom_point(position = position_jitter(width = .2, height = 0))
+dev.off()
+
+
+```
+
+Lets try running CThripsos scoring on the single cells using the 500kb bins and much lower threshold of 5:
+
+```{r}
+
+CTobj <- CThripsos::CreateCThripsosObject(MB243CellRes@assayData$copynumber[fData(MB243CellRes)$end-fData(MB243CellRes)$start == 499999,])
+
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(CTobj, 50e6, 6, 2)
+
+six_change_score <- ct.out$CTData$CT_CellsChrs[, "2"]
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(CTobj, 50e6, 5, 2)
+
+five_change_score <- ct.out$CTData$CT_CellsChrs[, "2"]
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(CTobj, 50e6, 4, 2)
+
+four_change_score <- ct.out$CTData$CT_CellsChrs[, "2"]
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(CTobj, 50e6, 3, 2)
+
+three_change_score <- ct.out$CTData$CT_CellsChrs[, "2"]
+
+pdf("differentCutoffScores.pdf")
+plot(colMeans(gli2_copy), 
+     six_change_score[names(colMeans(gli2_copy))], 
+     xlab= "GLI2 Copy", ylab="Score", pch=16)
+points(colMeans(gli2_copy), 
+     five_change_score[names(colMeans(gli2_copy))], 
+     pch=16, col="red")
+
+points(colMeans(gli2_copy), 
+     four_change_score[names(colMeans(gli2_copy))], 
+     pch=16, col="green")
+
+
+points(colMeans(gli2_copy), 
+     three_change_score[names(colMeans(gli2_copy))], 
+     pch=16, col="blue")
+
+legend("topright", legend=c("6", "5", "4", "3"), col=c("black", "red", "green", "blue"), pch=16)
+dev.off()
+
+```
+
+plot(colMeans(gli2_copy), colMeans(4^MB243logR[MB243logR[, chr] == gene_chr, -c(1, 2, 3)], na.rm = T)[colnames(gli2_copy)])
+
+```
+
+
+Lets compare gini to GLI2 copy:
+
+```{r}
+
+chr2percell <-  MB243CellRes@assayData$copynumber[(fData(MB243CellRes)$end-fData(MB243CellRes)$start == 499999)&fData(MB243CellRes)$chr==2,]
+
+GiniPerCell <- apply(chr2percell,2,\(x)Gini(x, na.rm = TRUE))
+
+plot(colMeans(gli2_copy), GiniPerCell[names(colMeans(gli2_copy))])
+
+
+```
+
+
+```{r}
+
+chr2percell <-  MB243CellRes@assayData$copynumber[(fData(MB243CellRes)$end-fData(MB243CellRes)$start == 499999)&fData(MB243CellRes)$chr==2,]
+
+
+
+GiniPerCell <- apply(chr2percell,2,\(x)Gini(x, na.rm = TRUE))
+
+plot(colMeans(gli2_copy), GiniPerCell[names(colMeans(gli2_copy))])
+
+
+```
+
+
+
+
+

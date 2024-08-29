@@ -1,0 +1,702 @@
+---
+title: "Score CT on clones and Bootstrap Samples"
+output:
+  html_document:
+    df_print: paged
+---
+  
+Here, we try to score all the clones from all the samples for their CT scores
+
+
+```{r}
+
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(HMMcopy)
+library(doParallel)
+library(gtools)
+library(ggplot2)
+library(dplyr)
+library(CThripsos)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+```
+
+## 10x data
+
+
+Load in the results for all the STP-Nuc  here:
+
+```{r}
+
+STPcloneres <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNucres_1MB_clonal_cnv.rds")
+# STPcloneres <- readRDS("~/STPNucres_1MB_draft2_clonal_cnv.rds")
+
+STPboot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc2_1MB_boot_res.rds")
+
+```
+
+## STP CT Scoring
+
+```{r, results = 'hide'}
+
+STPcloneres.2 <- data.matrix(STPcloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(STPcloneres.2) <- paste0(STPcloneres$chr, ":", STPcloneres$start, "-", STPcloneres$end)
+
+test <- CThripsos::CreateCThripsosObject(STPcloneres.2)
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_8_2.rds")
+
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_6_2.rds")
+
+
+```
+### Bootstrap results per clone
+
+```{r}
+
+
+cur.boot.res <- STPboot$Ploidy_4$k_10
+
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPcloneres$chr, ":", STPcloneres$start, "-", STPcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPcloneres$chr, ":", STPcloneres$start, "-", STPcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPcloneres$chr, ":", STPcloneres$start, "-", STPcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+```
+
+
+## STP-PDX
+
+```{r}
+
+STPPDXcloneres <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPPDX_clonal_cnv.rds")
+STPPDXboot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP-PDX_boot_res.rds")
+
+```
+
+## STPPDX CT Scoring
+
+```{r}
+
+STPPDXcloneres.2 <- data.matrix(STPPDXcloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(STPPDXcloneres.2) <- paste0(STPPDXcloneres$chr, ":", STPPDXcloneres$start, "-", STPPDXcloneres$end)
+
+
+test <- CThripsos::CreateCThripsosObject(STPPDXcloneres.2)
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_8_2.rds")
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_6_2.rds")
+
+
+```
+### Bootstrap results per clone
+
+```{r}
+
+
+cur.boot.res <- STPPDXboot$Ploidy_4$k_5
+
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPPDXcloneres$chr, ":", STPPDXcloneres$start, "-", STPPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPPDXcloneres$chr, ":", STPPDXcloneres$start, "-", STPPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPPDXcloneres$chr, ":", STPPDXcloneres$start, "-", STPPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+```
+
+Load in the results for all the ST1R-Nuc here:
+
+```{r}
+
+ST1Rcloneres <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_clonal_cnv.rds")
+ST1Rboot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/st1r_nuc_boot_res.rds")
+
+colnames(ST1Rcloneres)[5] <- "Diploid"
+
+```
+
+## ST1R CT Scoring
+
+```{r}
+
+ST1Rcloneres.2 <- data.matrix(ST1Rcloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(ST1Rcloneres.2) <- paste0(ST1Rcloneres$chr, ":", ST1Rcloneres$start, "-", ST1Rcloneres$end)
+
+
+test <- CThripsos::CreateCThripsosObject(ST1Rcloneres.2)
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_8_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_6_2.rds")
+
+
+```
+
+### Bootstrap results per clone
+
+```{r}
+
+
+cur.boot.res <- ST1Rboot$Ploidy_2$k_6
+
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1Rcloneres$chr, ":", ST1Rcloneres$start, "-", ST1Rcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1Rcloneres$chr, ":", ST1Rcloneres$start, "-", ST1Rcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1Rcloneres$chr, ":", ST1Rcloneres$start, "-", ST1Rcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+
+```
+
+ST1R-PDX
+
+
+```{r}
+
+ST1RPDXcloneres <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1RPDX_clonal_cnv.rds")
+ST1RPDXboot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/st1r_pdx_boot_res.rds")
+
+```
+
+## ST1RPDX CT Scoring
+
+```{r}
+
+ST1RPDXcloneres.2 <- data.matrix(ST1RPDXcloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(ST1RPDXcloneres.2) <- paste0(ST1RPDXcloneres$chr, ":", ST1RPDXcloneres$start, "-", ST1RPDXcloneres$end)
+
+
+test <- CThripsos::CreateCThripsosObject(ST1RPDXcloneres.2)
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_8_2.rds")
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_6_2.rds")
+
+
+```
+
+
+
+```{r}
+
+cur.boot.res <- ST1RPDXboot$Ploidy_2$k_3
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1RPDXcloneres$chr, ":", ST1RPDXcloneres$start, "-", ST1RPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1RPDXcloneres$chr, ":", ST1RPDXcloneres$start, "-", ST1RPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(ST1RPDXcloneres$chr, ":", ST1RPDXcloneres$start, "-", ST1RPDXcloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+```
+
+
+
+# RCMB18-PDX
+
+
+```{r}
+
+RCMB18cloneres <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18PDX_clonal_cnv.rds")
+RCMB18boot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/rcmb18_pdx_boot_res.rds")
+
+
+```
+
+## RCMB18-PDX CT Scoring
+
+```{r}
+
+RCMB18cloneres.2 <- data.matrix(RCMB18cloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(RCMB18cloneres.2) <- paste0(RCMB18cloneres$chr, ":", RCMB18cloneres$start, "-", RCMB18cloneres$end)
+
+
+test <- CThripsos::CreateCThripsosObject(RCMB18cloneres.2)
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_8_2.rds")
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_6_2.rds")
+
+
+```
+
+
+
+
+
+```{r}
+
+cur.boot.res <- RCMB18boot$Ploidy_2$k_4
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(RCMB18cloneres$chr, ":", RCMB18cloneres$start, "-", RCMB18cloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(RCMB18cloneres$chr, ":", RCMB18cloneres$start, "-", RCMB18cloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(RCMB18cloneres$chr, ":", RCMB18cloneres$start, "-", RCMB18cloneres$end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+
+```
+
+
+
+
+# MB243
+
+
+```{r}
+
+MB243cloneres <- readRDS("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_draft3_clonal_cnv.rds")
+MB243boot <- readRDS("mb243_boot_res_ploidyfixed.rds")
+
+
+```
+
+## MB243-Nuc CT Scoring
+
+```{r}
+
+MB243cloneres.2 <- data.matrix(MB243cloneres[,-c("chr", "start", "end"), with=FALSE])
+rownames(MB243cloneres.2) <- paste0(MB243cloneres$chr, ":", MB243cloneres$start, "-", MB243cloneres$end)
+
+
+test <- CThripsos::CreateCThripsosObject(MB243cloneres.2)
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+print(ct.out$CTData$CT_CellsChrs)
+
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_10_2.rds")
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_8_2.rds")
+
+
+ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+saveRDS(ct.out, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_6_2.rds")
+
+
+```
+
+
+
+
+
+```{r}
+cur.boot.res <- c(MB243boot$Ploidy_3$k_1, MB243boot$Ploidy_4$k_8)
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+
+
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+
+  rownames(cur.boot.cells) <- paste0(MB243cloneres$chr, ":", MB243cloneres$start, "-", MB243cloneres$end)
+
+
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 10, 2)
+  ct.out$CTData$CT_CellsChrs
+
+
+})
+
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_bootstrap_50MB_10_2.rds")
+sapply(cluster.boot.ct.res, function(x)return(colMeans(x>0)))
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+
+
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+
+  rownames(cur.boot.cells) <- paste0(MB243cloneres$chr, ":", MB243cloneres$start, "-", MB243cloneres$end)
+
+
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 8, 2)
+  ct.out$CTData$CT_CellsChrs
+
+
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_bootstrap_50MB_8_2.rds")
+
+
+cluster.boot.ct.res <- lapply(names(cur.boot.res), function(cluster){
+
+
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+
+  rownames(cur.boot.cells) <- paste0(MB243cloneres$chr, ":", MB243cloneres$start, "-", MB243cloneres$end)
+
+
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, 6, 2)
+  ct.out$CTData$CT_CellsChrs
+
+
+})
+
+saveRDS(cluster.boot.ct.res, "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_bootstrap_50MB_6_2.rds")
+
+
+
+```
+
+
+
+
+```{r}
+
+# plotSegmentsAllChr(RCMB18boot$Ploidy_2$k_4$Cluster_1$pseudobulk, RCMB18boot$Ploidy_2$k_4$Cluster_1$hmmres, pch=".")
+```
+
+```{r}
+
+# plotSegments2(RCMB18boot$Ploidy_2$k_4$Cluster_1$pseudobulk, RCMB18boot$Ploidy_2$k_4$Cluster_1$hmmres, pch=".", chromosome = "6")
+```
+
+
+```{r}
+
+# plotSegments2(RCMB18boot$Ploidy_2$k_4$Cluster_1$pseudobulk, RCMB18boot$Ploidy_2$k_4$Cluster_1$hmmres, pch=".", chromosome = "10")
+```
+
+
+
+```{r}
+
+# plotSegments2(RCMB18boot$Ploidy_2$k_4$Cluster_1$pseudobulk, RCMB18boot$Ploidy_2$k_4$Cluster_1$hmmres, pch=".", chromosome = "13")
+```
+
+

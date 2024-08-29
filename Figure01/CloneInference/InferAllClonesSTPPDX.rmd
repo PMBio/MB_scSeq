@@ -1,0 +1,502 @@
+---
+title: "Test calling clonal cnvs in STP-PDX"
+output:
+  html_document:
+    df_print: paged
+---
+Here, we look at the results of running scAbsolute on this sample.
+
+
+```{r}
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(HMMcopy)
+library(doParallel)
+library(gtools)
+library(ggplot2)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+```
+
+## 10x data
+
+Load in the results for all the STP samples here:
+
+```{r}
+
+STPPDX <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STP-PDX/500/predict/out.rds")
+# STPRPDXres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-PDX/500/predict/out.rds")
+# STPPDX <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPPDX-Nuclei/500/predict/out.rds")
+protocolData(STPPDX) <- AnnotatedDataFrame()
+colnames(STPPDX) <- gsub(colnames(STPPDX), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+# STPRNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-Nuclei//500/predict/out.rds")
+
+# STPRNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/RCMB18-PDX/500/predict/out.rds")
+
+
+# STPPDXres <- STPPDXres[,STPPDXres$ploidy.mod %in% seq(1,4)]
+# STPRPDXres <- STPRPDXres[,STPRPDXres$ploidy.mod %in% seq(1,4)]
+# STPPDX <- STPPDX[,STPPDX$ploidy.mod %in% seq(1,4)]
+# STPRNucres <- STPRNucres[,STPRNucres$ploidy.mod %in% seq(1,4)]
+
+```
+
+## STPPDX clone identification
+
+```{r}
+
+
+out.dir <- "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/qc/STPPDX"
+dir.create(out.dir, recursive = TRUE)
+
+pdf(file.path(out.dir, "variance_filter_hist.pdf"), height = 4, width = 4)
+hist(STPPDX$observed.variance/STPPDX$expected.variance, breaks = 50, xlab="Observed/Expected Variance", main="")
+abline(v=mad(STPPDX$observed.variance/STPPDX$expected.variance)*2+median(STPPDX$observed.variance/STPPDX$expected.variance))
+dev.off()
+
+hist(STPPDX$observed.variance/STPPDX$expected.variance, breaks = 50)
+abline(v=mad(STPPDX$observed.variance/STPPDX$expected.variance)*2+median(STPPDX$observed.variance/STPPDX$expected.variance))
+```
+
+There are clear outliers based on variance, which we remove.
+
+```{r}
+
+
+
+pdf(file.path(out.dir, "gini_filter_hist.pdf"), height = 4, width = 4)
+hist(STPPDX$gini_normalized, breaks = 50, xlab="Normalized Gini", main="")
+abline(v=mad(STPPDX$gini_normalized)*2+median(STPPDX$gini_normalized))
+dev.off()
+
+hist(STPPDX$gini_normalized, breaks = 50)
+abline(v=mad(STPPDX$gini_normalized)*2+median(STPPDX$gini_normalized))
+
+```
+
+```{r}
+
+hist(STPPDX$error, breaks = 60)
+abline(v=mad(STPPDX$error)*2+median(STPPDX$error))
+
+```
+
+
+We plot a comparison of the noisy and not noisy cells for the supplemental figures. 
+
+```{r}
+
+pdf(file.path(out.dir, "heatmap_all_cells.pdf"), height=.35*ncol(STPPDX)/25.4, width=160/25.4) ## mm to inch
+plotComplexHeatmapChromosomes(QDNAobject = STPPDX, background = "transparent")
+dev.off()
+
+print(ncol(STPPDX))
+
+```
+
+
+## Run filters
+```{r}
+var.filter <- mad(STPPDX$observed.variance / STPPDX$expected.variance) * 2 + median(STPPDX$observed.variance / STPPDX$expected.variance) > STPPDX$observed.variance / STPPDX$expected.variance
+gini.filter <- mad(STPPDX$gini_normalized) * 2 + median(STPPDX$gini_normalized) > STPPDX$gini_normalized
+# error.filter <- mad(STPPDX$error)*2+median(STPPDX$error) > STPPDX$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- STPPDX$ploidy.mod > 0
+filtered_out_cells <- STPPDX[, !(var.filter & gini.filter & ploidy.filter)]
+
+STPPDX <- STPPDX[, var.filter & gini.filter & ploidy.filter]
+
+print(ncol(STPPDX))
+print(ncol(filtered_out_cells))
+
+
+```
+
+
+```{r}
+
+pdf(file.path(out.dir, "heatmap_noisy_cells.pdf"), height=3.5*ncol(filtered_out_cells)/25.4, width=160/25.4)
+plotComplexHeatmapChromosomes(QDNAobject = filtered_out_cells, background = "transparent")
+dev.off()
+
+pdf(file.path(out.dir, "heatmap_clean_cells.pdf"), height=.35*ncol(STPPDX)/25.4, width=160/25.4)
+plotComplexHeatmapChromosomes(QDNAobject = STPPDX, background = "transparent")
+dev.off()
+
+```
+
+
+
+```{r}
+# 
+# var.filter <- mad(STPPDX$observed.variance/STPPDX$expected.variance)*2+median(STPPDX$observed.variance/STPPDX$expected.variance) > STPPDX$observed.variance/STPPDX$expected.variance
+# gini.filter <- mad(STPPDX$gini_normalized)*2+median(STPPDX$gini_normalized) > STPPDX$gini_normalized
+# # error.filter <- mad(STPPDX$error)*2+median(STPPDX$error) > STPPDX$error
+# ## Ploidy 0 doesn't work for ploidy normalization
+# ploidy.filter <- STPPDX$ploidy.mod > 0
+# STPPDX <- STPPDX[,var.filter&gini.filter&ploidy.filter]
+
+```
+
+
+Lets plot all the cell results for manual review:
+
+```{r}
+
+plotDataset(STPPDX, file="STPPDX_scAbs_allcells.pdf", f=plotCopynumber)
+
+```
+
+
+```{r}
+STPPDXSegmented <- mapCellsToCommonBreakpoints(STPPDX, mergeWidth = 2)
+
+ploidy.data <- data.frame(chr="ploidy", "start"=-1, end=-1)
+ploidy.data <- cbind(ploidy.data, t(data.frame(STPPDX$ploidy.mod)))
+
+STPPDX.ploidy.normed <- copy(STPPDXSegmented)
+
+for(cell in colnames(STPPDX)){
+  
+  STPPDX.ploidy.normed[,(cell):= STPPDX.ploidy.normed[,cell, with=F]/ STPPDX[,cell]$ploidy.mod*2]
+}
+
+STPPDX.ploidy.normed <- rbind(STPPDX.ploidy.normed, ploidy.data, use.names=F)
+
+
+```
+
+```{r}
+dendroOrder <- rowSums(abs(t(assayDataElement(STPPDX, "copynumber"))-STPPDX$ploidy.mod), na.rm = TRUE)
+
+annot_rows = rowAnnotation(ploidy=STPPDX$ploidy.mod, "obs/exp var"=STPPDX$observed.variance/STPPDX$expected.variance, "gini"=STPPDX$gini, error=STPPDX$error)
+
+
+ploidy.normed.man.wardd2 <- hclust(dist(t(STPPDX.ploidy.normed[,c(-1,-2,-3)]), method="manhattan"), method = "ward.D2")
+
+  
+plotComplexHeatmapCommonSegs(STPPDXSegmented, clust.rows=ploidy.normed.man.wardd2, annot_rows=annot_rows)
+  
+```
+
+```{r}
+
+annot_rows = rowAnnotation(ploidy=STPPDX$ploidy.mod, "obs/exp var"=STPPDX$observed.variance/STPPDX$expected.variance, "gini"=STPPDX$gini, error=STPPDX$error)
+
+
+bins.man.wardd2 <- clusterMannhattanOnBins(STPPDX)
+
+denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),dendroOrder)
+
+
+# xx <- prcomp(t(STPPDXSegmented[complete.cases(STPPDXSegmented),c(-1,-2,-3), with=FALSE]))$x[,"PC1"]
+# denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),xx)
+
+plotComplexHeatmapCommonSegs(STPPDXSegmented, clust.rows=denrToPlot, annot_rows=annot_rows)#, column_title = unique(featureData(STPPDX)$chromosome))
+  
+```
+
+```{r}
+
+annot_rows = rowAnnotation(ploidy=STPPDX$ploidy.mod, "obs/exp var"=STPPDX$observed.variance/STPPDX$expected.variance, "gini"=STPPDX$gini, error=STPPDX$error)
+
+
+bins.cor.wardd2 <- clusterCorOnBins(STPPDX)
+
+denrToPlot <- reorder(as.dendrogram(bins.cor.wardd2),dendroOrder)
+
+
+# xx <- prcomp(t(STPPDXSegmented[complete.cases(STPPDXSegmented),c(-1,-2,-3), with=FALSE]))$x[,"PC1"]
+# denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),xx)
+
+plotComplexHeatmapCommonSegs(STPPDXSegmented, clust.rows=denrToPlot, annot_rows=annot_rows)
+  
+```
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'STP-PDX'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(STPPDX)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  
+  correctReadcount2(cellData)
+
+}
+names(cellList) <- colnames(STPPDX)
+
+
+
+```
+
+
+```{r}
+library(doParallel)
+registerDoParallel(10)
+# 
+# clonal.cnv.res.boot <- inferClonalCNVs(STPPDX, cellList, bootstrap = TRUE, nBoot=101)
+# saveRDS(clonal.cnv.res.boot, file="STP-PDX_boot_res.rds")
+clonal.cnv.res.boot <- readRDS('STP-PDX_boot_res.rds')
+```
+
+
+```{r}
+for(ploidy in names(clonal.cnv.res.boot)){
+  
+  for(k in 1:12){
+    pdf(paste0("STPPDX_",ploidy,"_k_", k, "clones_psuedobulk.pdf"), height = 11, width = 8.5)
+    print(plotClonalProfilesAtK(clonal.cnv.res.boot[ploidy], k))
+    dev.off()
+  }
+  
+}
+
+
+
+```
+
+
+
+Lets plot some GOF metrics for the different k selections:
+
+```{r}
+
+
+clusterGOFmetrics <- computeGOFMetrics(clonal.cnv.res.boot)
+
+ploidy4GOF <- sapply(clusterGOFmetrics$Ploidy_4, `[[`, 1)
+
+
+pdf("STPPDXploidy4GOFbyK.pdf", onefile = TRUE)
+plot(seq_len(ncol(ploidy4GOF)), ploidy4GOF["RMSE",], xlab="K", ylab="RMSE", type = "b", pch=16)
+plot(seq_len(ncol(ploidy4GOF)), ploidy4GOF["logRMSE",], xlab="K", ylab="logRMSE", type = "b", pch=16)
+plot(seq_len(ncol(ploidy4GOF)), ploidy4GOF["AIC",], xlab="K", ylab="AIC", type = "b", pch=16)
+plot(seq_len(ncol(ploidy4GOF)), ploidy4GOF["BIC",], xlab="K", ylab="BIC", type = "b", pch=16)
+dev.off()
+
+```
+
+
+```{r}
+sapply(clonal.cnv.res.boot$Ploidy_4,returnBootstrapFStats)
+
+```
+Here, k=5 and k=11 both look like local optima. Lets visualize whats going on:
+
+
+
+```{r}
+library(uwot)
+library(ggplot2)
+
+my.umap <- umap(dist(t(STPPDXSegmented[,-c(1:3), with=F])[STPPDX$ploidy.mod==4,]))
+
+cluster_assignment <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_4$k_5, `[`, "cells"), idcol="Cluster")
+
+toPlot <- data.frame(UMAP1 = my.umap[,1], UMAP2=my.umap[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.umap), cluster_assignment$cells)])
+
+ggplot(toPlot, aes(UMAP1, UMAP2, col=Cluster)) + geom_point()
+
+
+```
+
+
+```{r}
+
+
+cluster_assignment <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_4$k_11, `[`, "cells"), idcol="Cluster")
+
+toPlot <- data.frame(UMAP1 = my.umap[,1], UMAP2=my.umap[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.umap), cluster_assignment$cells)])
+
+ggplot(toPlot, aes(UMAP1, UMAP2, col=Cluster)) + geom_point()
+
+
+```
+
+```{r}
+cluster_assignment <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_4$k_5, `[`, "cells"), idcol="Cluster")
+
+my.mds <- cmdscale(dist(t(STPPDXSegmented[,-c(1:3), with=F])[STPPDX$ploidy.mod==4,]))
+
+
+toPlot <- data.frame(MDS1 = my.mds[,1], MDS2=my.mds[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.mds), cluster_assignment$cells)])
+
+
+
+ggplot(toPlot, aes(MDS1, MDS2, col=Cluster)) + geom_point()
+
+```
+
+```{r}
+
+cluster_assignment <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_4$k_5, `[`, "cells"), idcol="Cluster")
+
+
+toPlot <- data.frame(MDS1 = my.mds[,1], MDS2=my.mds[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.mds), cluster_assignment$cells)])
+
+
+
+ggplot(toPlot, aes(MDS1, MDS2, col=Cluster)) + geom_point()
+
+```
+
+
+The k=5 case seems more reasonable here, so we will go with it. 
+
+
+
+```{r}
+
+clonalCNVProfiles <- clonal.cnv.res.boot$Ploidy_4$k_1$Cluster_1$pseudobulk[,c(1,2,3), with=FALSE]
+
+ploidy4clones <- lapply(clonal.cnv.res.boot$Ploidy_4$k_5, function(k.res){
+  return(round(2^(k.res$hmmres$mus[,1]+2)[k.res$hmmres$state]))
+})
+
+ploidy4clones <- do.call(cbind,ploidy4clones[as.logical(sapply(ploidy4clones, length))])
+  
+clonalCNVProfiles <- cbind(clonalCNVProfiles, ploidy4clones )
+
+colnames(clonalCNVProfiles)[-c(1:3)] <- paste0("Clone_", 1:5) 
+
+```
+
+
+
+```{r}
+
+saveRDS(clonalCNVProfiles, file="~/STPPDX_draft_clonal_cnv.rds")
+png("~/stp_pdx_clonal_cnv_draft.png", width=10, height=5, unit="in", res=1000)
+plotComplexHeatmapCommonSegs(clonalCNVProfiles, clust.rows = FALSE, column_title = unique(clonalCNVProfiles$chr))
+dev.off()
+```
+
+
+```{r}
+
+
+ploidy4clonesCells <- lapply(clonal.cnv.res.boot$Ploidy_4$k_5, function(x) return(x['cells']))
+
+ploidy4clonesCells <- ploidy4clonesCells[sapply(ploidy4clonesCells, function(x) length(x[[1]]))>=5]
+
+allCloneCells <- ploidy4clonesCells
+
+names(allCloneCells) <- paste0("Clone_", 1:5) 
+
+
+
+cloneAssignment <- rbindlist(allCloneCells, idcol = "Clone")
+
+if(any(!colnames(STPPDX)%in%cloneAssignment$cells)){
+  notAssignedCells <- data.frame(Clone = "Not Assigned", cells=colnames(STPPDX)[!colnames(STPPDX)%in%cloneAssignment$cells])
+  cloneAssignment <- rbind(cloneAssignment, notAssignedCells)
+}
+
+
+
+write.csv(cloneAssignment, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_cell_clone_assignments.csv")
+
+```
+
+
+
+```{r}
+
+HMMCopyMat <- sapply(cellList, `[[`, "copy")
+
+HMMCopyMat <- cbind(cellList[[1]][,c(1:3)], HMMCopyMat)
+
+write.csv(HMMCopyMat, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_hmmcopy_20kb_logR.csv")
+
+
+```
+
+
+```{r}
+library(dplyr)
+
+
+gccor <- estimate_gc_correction(STPPDX)
+
+scAbsoluteRC <- assayDataElement(STPPDX,"calls")*1/gccor
+
+write.csv(scAbsoluteRC, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_scAbsolute_500kb_corReadCount.csv")
+
+
+scAbsoluteTCN <- assayDataElement(STPPDX,"copynumber")
+write.csv(scAbsoluteTCN, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_hmmcopy_500kb_TCN.csv")
+
+```
+
+

@@ -1,0 +1,2869 @@
+---
+title: "Figure 1 revised manuscript"
+output:
+  html_document:
+    df_print: paged
+---
+This file is meant to create figure 1 for the revised manuscript. 
+
+```{r}
+rm(list=ls())
+set.seed(16011985) # set the seed of random number generator 
+
+
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(ggplot2)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+
+
+ct.threshold <- 8
+
+confidence.threshold <- 0.5
+
+```
+
+Load in Moritz' functions:
+
+```{r}
+
+
+# package dependencies, which have to be installed are checked and installed if not available
+list.of.packages <- c("reshape2", "tidyverse", "readr", "BiocManager", "data.table", "gtools", "ggplot2", "dendextend", "ggpubr",
+                      "matrixStats", "ggrastr")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, repos = "http://cran.us.r-project.org")
+if(length(new.packages)) BiocManager::install(new.packages)
+
+# load functions
+source('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/figure_methods_stp_pdx/scripts/all_functions.R')
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+set.seed(29112019)
+
+# negate %in%
+"%ni%" <- Negate("%in%")
+
+chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", ct.threshold, sep = "_")
+if (!dir.exists(out.dir)) dir.create(out.dir)
+
+
+CNVchangeScale <- scale_fill_manual(name = "Subclonal Alteration Status", values = c(
+  "Not Altered" = "white",
+  "Clonal CNV" = "#33741a",
+  "Subclonal CNV" = "#6ba82f",
+  "Subclonal CT Event" = "#de77af",
+  "Clonal CT Event" = "#d01c8b",
+  "Subclonal Low Confidence CT Event" = "gray50"
+))
+
+
+
+```
+
+Define some functions:
+
+```{r}
+
+############################################################################
+##                           FUNCTIONS
+############################################################################
+
+modify_clone_colors<-function(plot_mod, chrs_num)
+{
+  # Generate the ggplot2 plot grob
+  g <- grid.force(ggplotGrob(plot_mod))
+  # Get the names of grobs and their gPaths into a data.frame structure
+  grobs_df <- do.call(cbind.data.frame, grid.ls(g, print = FALSE))
+  # Build optimal gPaths that will be later used to identify grobs and edit them
+  grobs_df$gPath_full <- paste(grobs_df$gPath, grobs_df$name, sep = "::")
+  grobs_df$gPath_full <- gsub(pattern = "layout::", 
+                              replacement = "", 
+                              x = grobs_df$gPath_full, 
+                              fixed = TRUE)
+  
+  # Get the gPaths of the strip background grobs
+  strip_bg_gpath <- grobs_df$gPath_full[grepl(pattern = "strip\\.background.*", 
+                                              x = grobs_df$gPath_full)]
+  # Generate some color
+  fills <- RColorBrewer::brewer.pal(n = 7, name = "Set1")
+  aux<-fills[1]
+  fills[1]<-fills[3]
+  fills[3]<-aux
+  
+  for (i in (chrs_num+1):length(strip_bg_gpath)){
+    g <- editGrob(grob = g, gPath = strip_bg_gpath[i], gp = gpar(fill = fills[i-chrs_num]))
+  }
+  # Draw the edited plot
+  # grid.newpage(); grid.draw(g)
+  return(g)
+}
+
+
+
+################################################################################
+# FUNCTION TO NORMLIZE TO PlOIDY
+################################################################################
+### mat - DF that has bins as rows, clones/cells as columns. Row names should be of 
+###       format chr:star-end where chr can be of value 1-22, X, Y
+### normPloidy - what ploidy you want as default
+################################################################################
+normalizeToPloidy_version2 <- function(mat, normPloidy=2){
+  median_ploidy <- apply(mat,2,median)
+  names(median_ploidy) <- colnames(mat)
+  for(i in 1:ncol(mat)){
+    col_id <- colnames(mat)[i]
+    if(median_ploidy[col_id]!=normPloidy){
+      mat[,col_id] <- floor(mat[,col_id]*( normPloidy/max(1,median_ploidy[col_id]) ))
+    }
+  }
+  
+  return(mat)
+}
+
+normalizeToPloidy <- function(mat, normPloidy=2){
+  med.ploidy <- sapply(mat, function(x) median(x))
+  mult.factor <- normPloidy/med.ploidy
+  mult.factor[mult.factor>1] <- floor(mult.factor[mult.factor>1])
+  mat2<- apply(mat, 2, function(x) round( x* (if(normPloidy/median(x) > 1) floor(normPloidy/median(x)) else normPloidy/median(x)    ) ) )
+  
+  return(mat2)
+}
+
+
+```
+
+
+# Figure 1a
+
+## Bulk
+
+First, lets plot the bulk data for this sample. We normalize it to ploidy 4. We load in the single cell results just to get the coordinates from them
+(length of chromosomes, centromere bins, etc.)
+
+```{r}
+STPNucCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNucres_1MB_clonal_cnv.rds")
+
+sc.coords <- STPNucCloneRes[,.(chr, start, end)]
+sc.coords$end <- sc.coords$end-1
+
+
+```
+
+```{r}
+
+############################################################################
+##                VISUALISE THE BULK SEQUENCING DATA FOR STP-NUCLEI
+############################################################################
+
+# STP
+BulkTable_STP <-read.table(file = "/omics/groups/OE0014/internal/share/B060_Stuttgart_case/cnv_CNmops/ST_LFS_1/XI046_ST_LFS_1_tumor/XI046_ST_LFS_1_tumor_control.bins.tsv", stringsAsFactors = F, header = T)
+# BulkTable_STP[which(BulkTable_STP[,1]=="X"),1]<-23
+# BulkTable_STP[which(BulkTable_STP[,1]=="Y"),1]<-24
+
+BulkTable_STP <- merge(sc.coords, BulkTable_STP, by.x = c("chr", "start", "end"), by.y = c("chr", "start", "end"), all.x = T)
+
+
+# Non aggregated data
+# order data per chromosome (it was alphabetically ordered in the stored data)
+orderedSTP<-c()
+for(i in c(1:22, "X", "Y")){orderedSTP <- rbind(orderedSTP, BulkTable_STP[which(BulkTable_STP[,1]==i),])}
+
+## Map the bulk onto common coordinates as the single cell data
+
+
+
+
+
+
+# we calculate the tumor to control ratio
+BulkData <- orderedSTP[,4]/orderedSTP[,5]
+plot(2**(log2(BulkData)) * 4, pch=16)
+
+xy<-which(orderedSTP[,1]=="X" | orderedSTP[,1]=="Y")
+notxy<-which(!(orderedSTP[,1]=="X" | orderedSTP[,1]=="Y"))
+
+# we transfor the ratio to absolute CNVs
+BulkData[notxy] <- 2**(log2(BulkData[notxy])) * 4 
+BulkData[xy]<- 2**(log2(BulkData[xy])) * 2 
+
+# wrangle into shape and rename
+bulk.data <- data.frame(bulk = BulkData[[1]], chr = orderedSTP[, 1], coordinates = 1:nrow(orderedSTP))
+bulk.data$bulk[which(bulk.data$bulk>8)]=8
+bulk.data$order<-1:length(bulk.data$chr)
+# bulk.data$chr[which(bulk.data$chr==23)]="X"
+# bulk.data$chr[which(bulk.data$chr==24)]="Y"
+
+# visualise Figure1A Bulk
+plotbulk <- ggplot(bulk.data, aes(coordinates, bulk)) +
+  geom_point(aes(colour = bulk))+
+  scale_colour_gradient2(low = "darkblue", high = "darkred", mid ="darkgray", midpoint = (2))+
+  theme_bw()+theme(axis.text=element_text(face="bold", size=12, colour = "black"), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      axis.ticks.x = element_blank(), axis.text.x = element_blank(), panel.spacing.x=unit(0, "lines"), panel.border = element_rect(linetype =3), legend.position = "none", strip.background = element_blank(), 
+      strip.text = element_blank()
+      )+
+  facet_grid(.~reorder(chr,order), scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="")+
+  scale_x_continuous(expand = c(0.01, 0.01))
+# plotbulk
+ggsave(file="/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/Figures_Paper/Figure1/Figure1A_bulk_ploidy4.png", plot=plotbulk, width=160*4, height=25*2, dpi=300, units = "mm")
+
+plotbulk <- plotbulk + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+
+ggsave(file = "/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/Figures_Paper/Figure1/Figure1A_bulk_ploidy4_noaxis.png", plot = plotbulk, width = 160 * 4, height = 25 * 2, dpi = 300, units = "mm")
+
+
+```
+
+
+## Single Cell
+
+STP-Nuclei is the sample we will use for Figure 1A:
+
+```{r}
+
+
+STPNucCellRes <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STP-Nuclei-2/1000/predict/out.rds")
+protocolData(STPNucCellRes) <- AnnotatedDataFrame()
+colnames(STPNucCellRes) <- gsub(colnames(STPNucCellRes), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+
+STPNucCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc2_1MB_boot_res.rds")
+
+STPNucCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNucres_1MB_clonal_cnv.rds")
+
+STPNucCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_",ct.threshold,"_2.rds"))
+# STPNucCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_8_2.rds")
+
+colnames(STPNucCloneRes)[length(colnames(STPNucCloneRes))] <- "Normal"
+
+
+sample.tmp <- "STP-Nuclei"
+
+
+
+```
+
+
+
+```{r}
+SampleCloneList <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_cell_clone_assignments.csv", header=TRUE)
+
+print(paste0('Cells Before QC: ',
+ncol(STPNucCellRes)))
+
+print(paste0('Cells After QC: ',
+SampleCloneList[,.N]
+))
+
+print(paste0('Cells Assigned to Clone: ',
+SampleCloneList[Clone!='Not Assigned',.N]
+))
+
+```
+
+
+region with germline gain:  1 85980001 86000000       12949                    12591  0.0405044795
+
+Now we need subset to the cells belonging to a particular clone.
+
+After examining the singlecell profiles, and the clonal profiles, we chose k=10 for the Ploidy 4 cells.
+
+For the ploidy 2 state, we only have the normal cells, which are filtered into a single clone at k=6.
+
+
+```{r}
+
+ploidy4ClonesBoot <- STPNucCloneBoot$Ploidy_4$k_10[sapply(STPNucCloneBoot$Ploidy_4$k_10, length)>2]
+
+temp <- sapply(ploidy4ClonesBoot, `[[`, "cells")
+
+cellCloneDT <- data.table(data.frame(Cell=unlist(temp), Clone=rep(names(temp), times=sapply(temp, length))))
+
+cellCloneDT[,Clone:=paste0("Clone_", .GRP), Clone]
+
+
+ploidy2ClonesBoot <- STPNucCloneBoot$Ploidy_2$k_4[sapply(STPNucCloneBoot$Ploidy_2$k_4, length)>2]
+
+cellCloneDT2 <- data.table(data.frame(Cell=ploidy2ClonesBoot[[1]]$cells, Clone="Normal"))
+
+cellCloneDT <- rbind(cellCloneDT, cellCloneDT2)
+
+clones <- cellCloneDT[,unique(Clone)]
+
+SingleCellCopynumberMat <- assayDataElement(STPNucCellRes, "copynumber")
+
+
+```
+
+
+
+
+```{r, cache=TRUE}
+
+
+cur.boot.res <- STPNucCloneBoot$Ploidy_4$k_10
+
+cur.boot.res<-cur.boot.res[sapply(cur.boot.res, length)==4]
+
+
+cluster.boot.ct.res.chr <- lapply(names(cur.boot.res), function(cluster){
+  
+    
+  cur.boot.cells <- sapply(cur.boot.res[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+  
+  rownames(cur.boot.cells) <- paste0(STPNucCloneRes$chr, ":", STPNucCloneRes$start, "-", STPNucCloneRes
+                                     $end)
+  
+  
+  test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+  ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, ct.threshold, 2)
+  ct.out$CTData$CT_CellsChrs
+
+  
+})
+
+names(cluster.boot.ct.res.chr) <- clones[1:4]
+
+
+```
+
+Read in precomputed confidences per chromosome.
+
+```{r}
+
+confidences.m <-  fread(file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/confidence_in_CT_events.csv")
+
+```
+
+
+```{r}
+
+clones.to.plot <- clones[1:4]
+
+for (clone.tmp in clones.to.plot){
+    
+    # get the clone
+    clone.cells <- cellCloneDT[Clone==clone.tmp, Cell]
+    print(paste("Processing clone", clone.tmp))
+    cells.mat <- SingleCellCopynumberMat[,clone.cells ]
+    
+    # 
+    midpoint <- 4
+    chromosomes <- c(as.character(c(1:22)),c('X','Y'))
+    maxGain=8
+    minLoss=0
+    cells.mat[cells.mat>maxGain] <- maxGain
+    cells.mat[cells.mat<minLoss] <- minLoss
+    
+    
+    melted <- reshape2::melt(as.matrix(cells.mat), varnames = c("Chromosome", "Cells"), as.is = T)
+    melted$chrXY <- sapply(strsplit(melted$Chromosome, ':'), '[[',1)
+    melted$chrXY <- factor(melted$chrXY, levels = chromosomes)
+    melted$start <- sapply(strsplit(sapply(strsplit(melted$Chromosome, '-'), '[[',1), ':'), '[[',2)
+    melted$end <- sapply(strsplit(melted$Chromosome, '-'), '[[',2)
+    melted$order <- 1:length(melted$Chromosome)
+    
+    # set coulouring
+    # pcol <- c("#053061", "#3C8ABE", "#ffffff", "#F4AA88", "#EB9273", "#D6604D")
+    # pcol <- rev(c('#b2182b','#d6604d','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#92c5de','#4393c3','#2166ac'))
+    pcol <- rev(c('#b2182b','#C43C3C','#d6604d','#E58368','#f4a582','#fddbc7',"#ffffff",'#d1e5f0','#4393c3'))
+    names(pcol) <- c(0, 1, 2, 3, 4, 5, 6, 7, 8)
+    
+    # set cluster name
+    melted$community <- clone.tmp
+    melted$community <- as.character(melted$community)
+    melted$clone <- melted$community
+    melted$value <- as.numeric(melted$value)
+    melted$Cells <- factor(melted$Cells, levels = clone.cells)
+    
+    # create heatmap for the clone
+    print('Plotting per-cell heatmap.')
+
+    p.all.cells2.b <- (ggplot(melted) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=40, colour = "black",),
+            strip.text.y = element_text(face="bold", size=40, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      # theme(aspect.ratio=45/((length(clone.cells)/length(unique(cellCloneDT$Cell))*35))) +
+      NULL
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.y = element_blank())#+theme(legend.position="none")
+    
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.heatmap.withchrlabels.pdf')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    # if(clone.tmp != "Clone_1"){
+      p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    # }
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.heatmap.png')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '.nolegend.png')
+    png(file = fig.file, width = 45, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    ############################################################################
+    ##      VISUALIZE CHROMOSOME 7 ONLY INSTEAD OF THE ENTIRE HEATMAP
+    ############################################################################
+    print('Plotting chr 7 heatmap.\n')
+
+    chr7.melt <- melted[melted$chrXY == 7,]
+    
+    # create heatmap for the clone
+    p.all.cells2.b<- (ggplot(chr7.melt) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=18, colour = "black",),
+            strip.text.y = element_text(face="bold", size=18, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone))) ~ reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    # if(clone.tmp != "Clone_1"){
+      p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    # }
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr7_heatmap.png')
+    png(file = fig.file, width = 13, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), units="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr7_heatmap.nolegend.png')
+    png(file = fig.file, width = 13, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), units="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    
+    
+    ############################################################################
+    ##      VISUALIZE CHROMOSOME 14 ONLY INSTEAD OF THE ENTIRE HEATMAP
+    ############################################################################
+    print('Plotting chr 14 heatmap.')
+
+    chr14.melt <- melted[melted$chrXY == 14,]
+    
+    # create heatmap for the clone
+    p.all.cells2.b<- (ggplot(chr14.melt) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=18, colour = "black",),
+            strip.text.y = element_text(face="bold", size=18, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted$clone))) ~ reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    # if(clone.tmp != "Clone_1"){
+      p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    # }
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr14_heatmap.png')
+    png(file = fig.file, width = 13, height = (length(clone.cells)/length(unique(cellCloneDT$Cell))*35), units="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr14_heatmap.nolegend.png')
+    png(file = fig.file, width = 13, height = (length(clone.cells) / length(unique(cellCloneDT$Cell)) * 35), units = "in", res = 600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    ############################################################################
+    ##      PLOT THE CLONAL PROFILE FOR THIS CLONE
+    ############################################################################
+    
+    print('Plotting clonal heatmap.')
+
+    melted.clone <- data.frame(STPNucCloneRes[,c("chr", "start","end",clone.tmp), with=FALSE])
+    colnames(melted.clone)[4] <- "value"
+    melted.clone$chrXY <- melted.clone$chr
+    melted.clone$chrXY <- factor(melted.clone$chrXY, levels = chromosomes)
+    melted.clone$order <- 1:length(melted.clone$chrXY)
+    
+    melted.clone$community <- clone.tmp
+    melted.clone$community <- as.character(melted.clone$community)
+    # melted.clone$clone <- paste0("C", melted.clone$community)
+    melted.clone$clone <- clone.tmp
+    melted.clone$value <- as.numeric(melted.clone$value)
+    melted.clone$Chromosome <- paste0(melted.clone$chr, ":", melted.clone$start, "-", melted.clone$end)
+    melted.clone$Cells <- clone.tmp
+    
+    p.all.cells2.b<- (ggplot(melted.clone) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=0, colour = "black",),
+            strip.text.y = element_text(face="bold", size=0, colour = "black"),
+            strip.background = element_blank(),
+            # strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted.clone$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_clone_pseudobulk.heatmap.png')
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_', clone.tmp, '_clone_pseudobulk.heatmap.nolegend.png')
+    png(file = fig.file, width = 45, height = 2.5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    
+    ############################################################################
+    ##      VISUALIZE CHROMOSOME 7 ONLY INSTEAD OF THE ENTIRE HEATMAP
+    ############################################################################
+    print("Plotting clonal chr 7 heatmap.")
+
+    chr7.melt.clone <- melted.clone[melted.clone$chrXY == 7,]
+    
+    # create heatmap for the clone
+    p.all.cells2.b<- (ggplot(chr7.melt.clone) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=18, colour = "black",),
+            strip.text.y = element_text(face="bold", size=18, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted.clone$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr7_clone_pseudobulk.heatmap.png')
+    png(file = fig.file, width = 13, height = 5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr7_clone_pseudobulk.heatmap.nolegend.png')
+    png(file = fig.file, width = 45, height = 5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    
+    ############################################################################
+    ##      VISUALIZE CHROMOSOME 14 ONLY INSTEAD OF THE ENTIRE HEATMAP
+    ############################################################################
+    print("Plotting clonal chr 14 heatmap.")
+
+    chr14.melt.clone <- melted.clone[melted.clone$chrXY == 14,]
+    
+    # create heatmap for the clone
+    p.all.cells2.b<- (ggplot(chr14.melt.clone) + 
+      geom_tile(aes(x=reorder(Chromosome,order), 
+                                       y=reorder(Cells, order), fill=factor(value))) +
+      scale_fill_manual(name = "Copy Number", values = pcol)) +
+      theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+            axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+            panel.spacing=unit(.0001, "lines"), 
+            panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+            strip.text.x = element_text(face="bold", size=18, colour = "black",),
+            strip.text.y = element_text(face="bold", size=18, colour = "black"),
+            strip.background = element_rect(fill="white", colour="black", size =1), 
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+            axis.line = element_blank(), strip.text = element_text(size = 18),
+            plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+      facet_grid(factor(clone,levels = sort(unique(melted.clone$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+      NULL
+    
+    
+    p.all.cells2.b <- p.all.cells2.b + theme(strip.text.x = element_blank(), strip.text.y = element_blank())
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr14_clone_pseudobulk.heatmap.png')
+    png(file = fig.file, width = 13, height = 5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+    
+    
+    
+    p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+    
+    fig.file <- paste0(out.dir,'/', sample.tmp, '_clone', clone.tmp, '.chr14_clone_pseudobulk.heatmap.nolegend.png')
+    png(file = fig.file, width = 45, height = 5, unit="in", res=600)
+    print(p.all.cells2.b)
+    dev.off()
+
+    
+    
+    ############################################################################
+    ##      CT Score Track 
+    ############################################################################
+    
+    
+    curCloneCTScore <- t(STPNucCTScores$CTData$CT_CellsBins[clone.tmp,, drop=FALSE])
+    
+    melted.CTscore <-reshape2::melt(as.matrix(curCloneCTScore), varnames=c('Chromosome', 'Cells'), as.is=T)
+    melted.CTscore$chrXY <- sapply(strsplit(melted.CTscore$Chromosome, ':'), '[[',1)
+    melted.CTscore$chrXY <- factor(melted.CTscore$chrXY, levels = chromosomes)
+    melted.CTscore$start <- sapply(strsplit(sapply(strsplit(melted.CTscore$Chromosome, '-'), '[[',1), ':'), '[[',2)
+    melted.CTscore$end <- sapply(strsplit(melted.CTscore$Chromosome, '-'), '[[',2)
+    melted.CTscore$order <- 1:length(melted.CTscore$Chromosome)
+    
+    melted.CTscore$community <- clone.tmp
+    melted.CTscore$community <- as.character(melted.CTscore$community)
+    melted.CTscore$clone <- melted.CTscore$community
+    melted.CTscore$value <- as.numeric(melted.CTscore$value)
+    melted.CTscore$Cells <- melted.CTscore$community
+    melted.CTscore$`CT Score` <- melted.CTscore$value
+    
+
+    melted.CTscore <- data.table(melted.CTscore)
+
+    melted.CTscore$start <- as.numeric(melted.CTscore$start)
+    melted.CTscore$end <- as.numeric(melted.CTscore$end)
+
+    CTlocs <- melted.CTscore[value>0, .(start = min(start), mid=mean(c(min(start), max(end))), end=max(end)), chrXY]
+
+    CTscorePoint <- melt(STPNucCTScores$CTData$CT_CellsChrs[clone.tmp, , drop = FALSE])
+    colnames(CTscorePoint) <- c("Clone","chrXY", "CT")
+    CTlocs <- merge(CTlocs, CTscorePoint, by="chrXY")
+
+
+    resample <- data.table(melt(cluster.boot.ct.res.chr[[clone.tmp]]))
+    colnames(resample) <- c("sample", "chrXY", "CTres") 
+    resample2 <- resample[,.(lower=quantile(CTres, 0.25), upper=quantile(CTres, 0.75)), chrXY]
+    resample2 <- merge(resample2, merge(resample, resample2)[, .(lower_whisk = min(c(CTres[CTres > (lower - (upper - lower) * 1.5)], lower)), upper_whisk = max(c(CTres[CTres < (upper + (upper - lower) * 1.5)], upper))), chrXY])
+    test4 <- merge(CTlocs, resample2)
+    resample <- merge(CTlocs, resample)
+
+    print("Plotting CT boxplots.\n")
+
+
+    p.all.CT.box <- ggplot(melted.CTscore, aes(start, y=0)) + geom_point(alpha=0) + # the invisible points are required since scale=free
+      geom_rect(data = test4, mapping = aes(xmin=start, xmax=end, ymin=lower, ymax=upper, group = chrXY), 
+                fill="gray50", color="black", linewidth=2.5) + 
+      geom_segment(data = test4, aes(x = mid, xend=mid, y=lower, yend=lower_whisk)) + 
+      geom_segment(data = test4, aes(x = mid, xend=mid, y=upper, yend=upper_whisk)) + 
+      geom_segment(data = test4, aes(x = start, xend=end, y=CT, yend=CT), color="red", lwd=2.5) + 
+      # geom_point(data=resample, aes(x=mid, y=CTres), position=position_jitter(width=3e7)) +
+      facet_grid(~chrXY, scales = "free", space = "free") +
+        theme(
+          axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+          axis.text.y = element_text(size=64),
+          # axis.ticks.y = element_blank(), 
+          panel.spacing = unit(.0001, "lines"),
+          panel.background = element_rect(fill = "white"),
+          panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+          strip.text.x = element_text(face = "bold", size = 0, colour = "black", ),
+          strip.text.y = element_text(face = "bold", size = 0, colour = "black"),
+          strip.background = element_blank(),
+          # strip.background = element_rect(fill="white", colour="black", size =1),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.line = element_blank(), strip.text = element_text(size = 18),
+          plot.margin = margin(1, 0.5, 0.5, 0.5, "cm")
+        ) + labs(x="", y="") + ylim(c(0,1)) +
+        NULL
+
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_boxplot_withyaxis.png")
+    png(file = fig.file, width = 45, height = 5.5, unit="in", res=600)
+    print(p.all.CT.box)
+    dev.off()
+
+    p.all.CT.box <- p.all.CT.box + theme(axis.text.y=element_blank())
+
+    fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_boxplot_noyaxis.png")
+    png(file = fig.file, width = 45, height = 5.5, unit="in", res=600)
+    print(p.all.CT.box)
+    dev.off()
+
+  resample3 <- resample[, .("Percent CT" = mean(CTres > 0)), .(chrXY, start, end, Clone, CT)]
+
+  
+  clonal_status <- apply(STPNucCTScores$CTData$CT_CellsChrs[clones.to.plot, resample3[, chrXY]], 2, \(x) all(x > 0))
+
+  resample3[,Clonal := ifelse(clonal_status, "Clonal CT Event", "Subclonal CT Event")]
+
+  resample3 <- merge(resample3, confidences.m[Sample=="STP-Nuclei" & Clone == clone.tmp], by.x="chrXY", by.y="chr")
+
+  resample3[Clonal=="Subclonal CT Event" & value < confidence.threshold, Clonal := "Uncertain Subclonal CT Event"]
+
+  resample3$chrXY <- factor(resample3$chrXY, levels = chromosomes)
+  
+  p.all.CT.bar <- ggplot(melted.CTscore, aes(start, y = 0)) +
+    geom_point(alpha = 0) + # the invisible points are required since scale=free
+    geom_rect(
+      data = resample3, mapping = aes(xmin = start, xmax = end, ymin = 0, ymax = `Percent CT`, group = chrXY, fill=Clonal),
+      color = "black", linewidth = 2.5
+    ) + CNVchangeScale + 
+    # geom_point(data=resample, aes(x=mid, y=CTres), position=position_jitter(width=3e7)) +
+    facet_grid(~chrXY, scales = "free", space = "free") +
+    theme(
+      axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+      axis.text.y = element_text(size = 64),
+      # axis.ticks.y = element_blank(),
+      panel.spacing = unit(.0001, "lines"),
+      panel.background = element_rect(fill = "white"),
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      strip.text.x = element_text(face = "bold", size = 0, colour = "black", ),
+      strip.text.y = element_text(face = "bold", size = 0, colour = "black"),
+      strip.background = element_blank(),
+      # strip.background = element_rect(fill="white", colour="black", size =1),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      axis.line = element_blank(), strip.text = element_text(size = 18),
+      plot.margin = margin(1, 0.5, 0.5, 0.5, "cm")
+    ) +
+    labs(x = "", y = "") +
+    ylim(c(0, 1)) +
+    NULL
+  p.all.CT.bar <- p.all.CT.bar+theme(legend.position="none")
+
+  fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_barplot_withyaxis.png")
+  png(file = fig.file, width = 45, height = 5.5, unit = "in", res = 600)
+  print(p.all.CT.bar)
+  dev.off()
+
+  p.all.CT.bar <- p.all.CT.bar + theme(axis.text.y = element_blank())
+
+
+  fig.file <- paste0(out.dir, "/", sample.tmp, "_", clone.tmp, "_clone_CT_scores_barplot_noyaxis.png")
+  png(file = fig.file, width = 45, height = 5.5, unit = "in", res = 600)
+  print(p.all.CT.bar)
+  dev.off()
+
+}
+
+
+```
+
+
+We also create a similar plot for this sample with the shatterseek results from the bulk data.
+
+
+```{r}
+library(readxl)
+# shatterseek.res <- data.table(data.frame(read_excel("Shatterseek_bulk_all cases.xlsx")))
+shatterseek.res <- fread("/home/p163v/ShatterSeek_STP_Nuclei.csv")
+STPNuc.shatterseek.chr <- shatterseek.res[chromothriptic==TRUE, chrom]
+
+
+cells.mat <- SingleCellCopynumberMat[,1, drop=F ]
+
+melted <-data.table(reshape2::melt(as.matrix(cells.mat), varnames=c('Chromosome', 'Cells'), as.is=T))
+melted$chrXY <- sapply(strsplit(melted$Chromosome, ':'), '[[',1)
+melted$chrXY <- factor(melted$chrXY, levels = chromosomes)
+melted$start <- as.numeric(sapply(strsplit(sapply(strsplit(melted$Chromosome, '-'), '[[',1), ':'), '[[',2))
+melted$end <- as.numeric(sapply(strsplit(melted$Chromosome, '-'), '[[',2))
+melted$order <- 1:length(melted$Chromosome)
+melted[,Cells:=NULL]
+melted[,value:=NULL]
+
+midpoints <- melted[,.(mid=mean(c(min(start),max(end))), size=max(end)-min(end)), by=.(chrXY)]
+
+midpoints <- midpoints[chrXY%in%STPNuc.shatterseek.chr,]
+
+
+p.shatterseek.points <- ggplot(melted, aes(start, y = 0)) +
+  geom_point(alpha = 0) + # the invisible points are required since scale=free
+  geom_point(
+    data = midpoints, mapping = aes(x=mid, y=0.5),
+    fill = "black", color = "black", size=25, shape=18
+  ) +
+  # geom_point(data=resample, aes(x=mid, y=CTres), position=position_jitter(width=3e7)) +
+  facet_grid(~chrXY, scales = "free", space = "free") +
+  theme(
+    axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.spacing = unit(.0001, "lines"),
+    panel.border = element_blank(),
+    # panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    panel.background = element_rect(fill = "white"),
+    strip.text.x = element_text(face = "bold", size = 0, colour = "black", ),
+    strip.text.y = element_text(face = "bold", size = 0, colour = "black"),
+    strip.background = element_blank(),
+    # strip.background = element_rect(fill="white", colour="black", size =1),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    axis.line = element_blank(), strip.text = element_text(size = 18),
+    plot.margin = margin(1, 0.5, 0.5, 0.5, "cm")
+  ) +
+  labs(x = "", y = "") +
+  ylim(c(0, 1)) +
+  NULL
+
+fig.file <- paste0(out.dir, "/", sample.tmp, "_shatterseek_CT.pdf")
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.shatterseek.points)
+dev.off()
+
+
+```
+
+
+
+
+
+
+Lets plot the regions that have subclonal heterogeneity, and categorize them into different categories of clonal or subcloncal CT, or clonal/subclonal CNV.
+
+This particular plot is about the location of these changes summarized across clones, so here, we treat all the chromosomal locations within a window of CT as 
+chromothriptic. However, some of these regions are actually un-altered. The next figure we plot deals with this, looking at percent genome altered, and to what
+extent the alterations overlap with chromothriptic regions, exclusing unaltered regions. 
+
+This is important because the percentages between the two won't match!
+
+
+# Regions of genome altered figure
+
+Load in all samples to make the % genome altered figure:
+
+
+
+```{r load_all_other_samples}
+
+
+
+STPPDXCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPPDX_clonal_cnv.rds")
+
+STPPDXCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# STPPDXCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_8_2.rds") # nolint
+
+
+
+ST1RNucCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_clonal_cnv.rds")
+
+ST1RNucCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# ST1RNucCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_8_2.rds")
+
+
+ST1RPDXCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1RPDX_clonal_cnv.rds")
+
+ST1RPDXCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# ST1RPDXCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_8_2.rds")
+
+
+MB243CloneRes <- readRDS("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_draft3_clonal_cnv.rds")
+
+MB243CTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# MB243CT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_8_2.rds")
+
+
+
+RCMB18CloneRes <- readRDS("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18PDX_clonal_cnv.rds")
+
+RCMB18CTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# RCMB18CT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_8_2.rds")
+
+
+
+
+
+```
+
+## STP-Nuclei
+
+
+```{r}
+
+
+STPNucSubclonalToPlot <- STPNucCloneRes[,c(1:3)]
+STPNucSubclonalToPlot[,order:=.I]
+
+
+STPNucSubclonalToPlot[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+STPNuccloneDiffs <- STPNucCloneRes[apply(STPNucCloneRes[,-c(1:3,8)],1,\(x) length(unique(x)))>1,c(1:7)]
+
+setkey(STPNucSubclonalToPlot, chr, start, end)
+setkey(STPNuccloneDiffs, chr, start, end)
+
+STPNucSubclonalToPlot[STPNuccloneDiffs, Status := "Subclonal CNV"]
+setkey(STPNucSubclonalToPlot, order)
+
+
+# Patient is a male
+STPNuccloneAlteredSameInAll <- STPNucCloneRes[!chr%in%c("X", "Y") & apply(STPNucCloneRes[, -c(1:3, 8)], 1, \(x) {
+  (all(x != 4)) && (length(unique(x)) == 1)
+}), c(1:7)]
+
+STPNuccloneAlteredSameInAllXY <- STPNucCloneRes[chr%in%c("X", "Y") & apply(STPNucCloneRes[, -c(1:3, 8)], 1, \(x) {
+  (all(x != 2)) && (length(unique(x)) == 1)
+}), c(1:7)]
+
+
+setkey(STPNucSubclonalToPlot, chr, start, end)
+setkey(STPNuccloneAlteredSameInAll, chr, start, end)
+setkey(STPNuccloneAlteredSameInAllXY, chr, start, end)
+
+
+STPNucSubclonalToPlot[STPNuccloneAlteredSameInAll, Status := "Clonal CNV"]
+STPNucSubclonalToPlot[STPNuccloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+
+
+setkey(STPNucSubclonalToPlot, order)
+
+
+
+setkey(STPNucSubclonalToPlot, NULL)
+
+STPNuc_bin_level_CT_score <- melt(STPNucCTScores$CTData$CT_CellsBins[1:4,])
+colnames(STPNuc_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+STPNuc_bin_level_CT_score$Position <- as.character(STPNuc_bin_level_CT_score$Position)
+STPNuc_bin_level_CT_score$chr <- sapply(strsplit(STPNuc_bin_level_CT_score$Position, ":"), '[[', 1)
+STPNuc_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(STPNuc_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+STPNuc_bin_level_CT_score$end <- as.numeric(sapply(strsplit(STPNuc_bin_level_CT_score$Position, "-"), '[[', 2))
+STPNuc_bin_level_CT_score <- data.table(STPNuc_bin_level_CT_score)
+
+STPNuc_bin_level_CT_score <- merge(STPNuc_bin_level_CT_score, confidences.m[Sample=="STP-Nuclei"], )
+
+STPNucSubclonalToPlot[STPNuc_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+
+STPNucSubclonalToPlot[STPNuc_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+# STPNucSubclonalToPlot[STPNuc_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+STPNucSubclonalToPlot[STPNuc_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+# setkey(STPNuc_bin_level_CT_score, chr, start, end)
+
+# ## Removing Normal clone
+# STPNucSubclonalToPlot[apply(STPNucCTScores$CTData$CT_CellsBins[1:4,], 2, function(x) any(x>0) && !all(x>0)),]$Status <- "Subclonal CT Event"
+
+
+# ## Removing Normal clone
+# STPNucSubclonalToPlot[apply(STPNucCTScores$CTData$CT_CellsBins[1:4,], 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(STPNucSubclonalToPlot$Status)
+prop.table(table(STPNucSubclonalToPlot$Status))
+
+STPNucSubclonalToPlot$Status <- factor(STPNucSubclonalToPlot$Status, levels=c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(STPNucSubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc_Altered_Regions.csv")
+
+per_clone_status <- STPNuc_bin_level_CT_score[STPNucSubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc_Altered_Regions_perclone.csv")
+
+```
+
+
+Lets plot this:
+
+```{r}
+
+# ['#d01c8b','#f1b6da','#b8e186','#4dac26']
+
+STPNucSubclonalToPlot$chrXY <- STPNucSubclonalToPlot$chr
+STPNucSubclonalToPlot$chrXY <- factor(STPNucSubclonalToPlot$chrXY, levels = chromosomes)
+# STPNucSubclonalToPlot$order <- 1:length(STPNucSubclonalToPlot$chrXY)
+
+STPNucSubclonalToPlot$community <- "All"
+STPNucSubclonalToPlot$community <- as.character(STPNucSubclonalToPlot$community)
+# STPNucSubclonalToPlot$clone <- paste0("C", STPNucSubclonalToPlot$community)
+STPNucSubclonalToPlot$clone <- "All"
+STPNucSubclonalToPlot$Chromosome <- paste0(STPNucSubclonalToPlot$chr, ":", STPNucSubclonalToPlot$start, "-", STPNucSubclonalToPlot$end)
+STPNucSubclonalToPlot$Cells <- "All"
+
+
+p.all.cells2.b<- ggplot(STPNucSubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(Cells, order), fill=factor(Status)))) +
+  # ggrastr::rasterise(geom_tile(data = STPNucSubclonalToPlot8,aes(
+  #   x = reorder(Chromosome, order),
+  #   y = reorder(Cells, order), fill = factor(Status), height=0.5, 
+  # ))) + 
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(STPNucSubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- ggplot(STPNucSubclonalToPlot) +
+  ggrastr::rasterise(geom_tile(aes(
+    x = reorder(Chromosome, order),
+    y = reorder(Cells, order), fill = factor(Status)
+  ))) +
+  CNVchangeScale +
+  theme(
+    axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+    axis.ticks.y = element_blank(), axis.text.y = element_blank(),
+    panel.spacing = unit(.0001, "lines"),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    strip.text.x = element_text(face = "bold", size = 28, colour = "black", ),
+    strip.text.y = element_text(face = "bold", size = 0, colour = "black"),
+    strip.background.y = element_blank(),
+    strip.background = element_rect(fill="white", colour="black", size =1),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    axis.line = element_blank(), strip.text = element_text(size = 28),
+    plot.margin = margin(1, 0.5, 0.5, 0.5, "cm")
+  ) +
+  facet_grid(factor(clone, levels = sort(unique(STPNucSubclonalToPlot$clone))) ~ reorder(chrXY, order), switch = "y", scales = "free", space = "free") +
+  ggExtra::removeGrid() +
+  labs(x = "", y = "") +
+  NULL
+
+p.all.cells2.b <- p.all.cells2.b + theme(legend.position = "none")
+
+
+fig.file <- paste0(out.dir, "/", sample.tmp, "_subclonal_event_categories.nolegend_withheader.pdf")
+pdf(file = fig.file, width = 45, height = 45/6.33333333333)
+print(p.all.cells2.b)
+dev.off()
+
+
+
+```
+
+
+
+
+
+
+## STPPDX
+
+
+
+```{r}
+
+
+STPPDXSubclonalToPlot <- STPPDXCloneRes[,c(1:3)]
+STPPDXSubclonalToPlot[,order:=.I]
+
+
+STPPDXSubclonalToPlot[,Status := "Not Altered"]
+
+STPPDXcloneDiffs <- STPPDXCloneRes[apply(STPPDXCloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:8)]
+
+setkey(STPPDXSubclonalToPlot, chr, start, end)
+setkey(STPPDXcloneDiffs, chr, start, end)
+
+STPPDXSubclonalToPlot[STPPDXcloneDiffs, Status := "Subclonal CNV"]
+setkey(STPPDXSubclonalToPlot, order)
+
+
+STPPDXcloneAlteredSameInAll <- STPPDXCloneRes[!chr%in%c("X","Y")&apply(STPPDXCloneRes[, -c(1:3)], 1, \(x) {(all(x!=4))&&(length(unique(x))==1)}), c(1:8)]
+
+STPPDXcloneAlteredSameInAllXY <- STPPDXCloneRes[chr%in%c("X","Y")&apply(STPPDXCloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != 1)) && (length(unique(x)) == 1)
+}), c(1:8)]
+
+
+setkey(STPPDXSubclonalToPlot, chr, start, end)
+setkey(STPPDXcloneAlteredSameInAll, chr, start, end)
+setkey(STPPDXcloneAlteredSameInAllXY, chr, start, end)
+
+
+STPPDXSubclonalToPlot[STPPDXcloneAlteredSameInAll, Status := "Clonal CNV"]
+STPPDXSubclonalToPlot[STPPDXcloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(STPPDXSubclonalToPlot, order)
+
+
+
+setkey(STPPDXSubclonalToPlot, NULL)
+
+STPPDX_bin_level_CT_score <- melt(STPPDXCTScores$CTData$CT_CellsBins)
+colnames(STPPDX_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+STPPDX_bin_level_CT_score$Position <- as.character(STPPDX_bin_level_CT_score$Position)
+STPPDX_bin_level_CT_score$chr <- sapply(strsplit(STPPDX_bin_level_CT_score$Position, ":"), '[[', 1)
+STPPDX_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(STPPDX_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+STPPDX_bin_level_CT_score$end <- as.numeric(sapply(strsplit(STPPDX_bin_level_CT_score$Position, "-"), '[[', 2))
+STPPDX_bin_level_CT_score <- data.table(STPPDX_bin_level_CT_score)
+
+STPPDX_bin_level_CT_score <- merge(STPPDX_bin_level_CT_score, confidences.m[Sample=="STP-PDX"], )
+
+
+STPPDXSubclonalToPlot[STPPDX_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+STPPDXSubclonalToPlot[STPPDX_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+# 
+
+
+# STPPDXSubclonalToPlot[STPPDX_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+STPPDXSubclonalToPlot[STPPDX_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+
+
+# STPPDXSubclonalToPlot[apply(STPPDXCTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)), ]$Status <- "Subclonal CT Event"
+
+# STPPDXSubclonalToPlot[apply(STPPDXCTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(STPPDXSubclonalToPlot$Status)
+
+STPPDXSubclonalToPlot$Status <- factor(STPPDXSubclonalToPlot$Status, levels = c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(STPPDXSubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_Altered_Regions.csv")
+
+per_clone_status <- STPPDX_bin_level_CT_score[STPPDXSubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_Altered_Regions_perclone.csv")
+
+
+```
+
+Lets plot this:
+
+```{r}
+
+sample.tmp <- "STP-PDX"
+
+STPPDXSubclonalToPlot$chrXY <- STPPDXSubclonalToPlot$chr
+STPPDXSubclonalToPlot$chrXY <- factor(STPPDXSubclonalToPlot$chrXY, levels = chromosomes)
+# STPPDXSubclonalToPlot$order <- 1:length(STPPDXSubclonalToPlot$chrXY)
+
+STPPDXSubclonalToPlot$community <- "All"
+STPPDXSubclonalToPlot$community <- as.character(STPPDXSubclonalToPlot$community)
+# STPPDXSubclonalToPlot$clone <- paste0("C", STPPDXSubclonalToPlot$community)
+STPPDXSubclonalToPlot$clone <- "All"
+STPPDXSubclonalToPlot$Chromosome <- paste0(STPPDXSubclonalToPlot$chr, ":", STPPDXSubclonalToPlot$start, "-", STPPDXSubclonalToPlot$end)
+
+p.all.cells2.b<- ggplot(STPPDXSubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(clone, order), fill=factor(Status))), dpi=300) +
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(STPPDXSubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+
+
+
+
+## MB243
+
+
+```{r}
+
+
+MB243SubclonalToPlot <- MB243CloneRes[,c(1:3)]
+MB243SubclonalToPlot[,order:=.I]
+
+
+MB243SubclonalToPlot[,Status := "Not Altered"]
+
+MB243cloneDiffs <- rbind(MB243CloneRes[!chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) sum(x != c(3, 4, 4, 4))) > 1, c(1:7)],
+                        MB243CloneRes[chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) sum(x != c(2,2,2,2))) > 1, c(1:7)])
+
+setkey(MB243SubclonalToPlot, chr, start, end)
+setkey(MB243cloneDiffs, chr, start, end)
+
+MB243SubclonalToPlot[MB243cloneDiffs, Status := "Subclonal CNV"]
+setkey(MB243SubclonalToPlot, order)
+
+
+
+MB243cloneAlteredSameInAll <- MB243CloneRes[!chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) {(all(x!=c(3,4,4,4)))}), c(1:7)]
+MB243cloneAlteredSameInAllXY <- MB243CloneRes[chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != c(2, 2, 2, 2))) # A bit awkward here???
+}), c(1:7)]
+
+setkey(MB243SubclonalToPlot, chr, start, end)
+setkey(MB243cloneAlteredSameInAll, chr, start, end)
+setkey(MB243cloneAlteredSameInAllXY, chr, start, end)
+
+
+MB243SubclonalToPlot[MB243cloneAlteredSameInAll, Status := "Clonal CNV"]
+MB243SubclonalToPlot[MB243cloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(MB243SubclonalToPlot, order)
+
+
+
+setkey(MB243SubclonalToPlot, NULL)
+
+MB243_bin_level_CT_score <- melt(MB243CTScores$CTData$CT_CellsBins)
+colnames(MB243_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+MB243_bin_level_CT_score$Position <- as.character(MB243_bin_level_CT_score$Position)
+MB243_bin_level_CT_score$chr <- sapply(strsplit(MB243_bin_level_CT_score$Position, ":"), '[[', 1)
+MB243_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(MB243_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+MB243_bin_level_CT_score$end <- as.numeric(sapply(strsplit(MB243_bin_level_CT_score$Position, "-"), '[[', 2))
+MB243_bin_level_CT_score <- data.table(MB243_bin_level_CT_score)
+
+MB243_bin_level_CT_score <- merge(MB243_bin_level_CT_score, confidences.m[Sample=="MB243"], )
+
+
+MB243SubclonalToPlot[MB243_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+
+MB243SubclonalToPlot[MB243_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+# 
+
+
+# MB243SubclonalToPlot[MB243_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+MB243SubclonalToPlot[MB243_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+
+
+
+# MB243SubclonalToPlot[apply(MB243CTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)), ]$Status <- "Subclonal CT Event"
+
+# MB243SubclonalToPlot[apply(MB243CTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(MB243SubclonalToPlot$Status)
+
+MB243SubclonalToPlot$Status <- factor(MB243SubclonalToPlot$Status, levels = c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(MB243SubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_Altered_Regions.csv")
+
+per_clone_status <- MB243_bin_level_CT_score[MB243SubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_Altered_Regions_perclone.csv")
+
+
+```
+
+Lets plot this:
+
+```{r}
+
+sample.tmp <- "MB243"
+
+MB243SubclonalToPlot$chrXY <- MB243SubclonalToPlot$chr
+MB243SubclonalToPlot$chrXY <- factor(MB243SubclonalToPlot$chrXY, levels = chromosomes)
+# MB243SubclonalToPlot$order <- 1:length(MB243SubclonalToPlot$chrXY)
+
+MB243SubclonalToPlot$community <- "All"
+MB243SubclonalToPlot$community <- as.character(MB243SubclonalToPlot$community)
+# MB243SubclonalToPlot$clone <- paste0("C", MB243SubclonalToPlot$community)
+MB243SubclonalToPlot$clone <- "All"
+MB243SubclonalToPlot$Chromosome <- paste0(MB243SubclonalToPlot$chr, ":", MB243SubclonalToPlot$start, "-", MB243SubclonalToPlot$end)
+# MB243SubclonalToPlot$Cells <- clone.tmp
+
+p.all.cells2.b<- ggplot(MB243SubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(clone, order), fill=factor(Status))), dpi=300) +
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(MB243SubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+
+
+
+## ST1R-Nuclei
+
+
+```{r}
+
+
+ST1RNucSubclonalToPlot <- ST1RNucCloneRes[,c(1:3)]
+ST1RNucSubclonalToPlot[,order:=.I]
+
+
+ST1RNucSubclonalToPlot[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+ST1RNuccloneDiffs <- ST1RNucCloneRes[apply(ST1RNucCloneRes[,-c(1:3,5)],1,\(x) length(unique(x)))>1,c(1:5)]
+
+setkey(ST1RNucSubclonalToPlot, chr, start, end)
+setkey(ST1RNuccloneDiffs, chr, start, end)
+
+ST1RNucSubclonalToPlot[ST1RNuccloneDiffs, Status := "Subclonal CNV"]
+setkey(ST1RNucSubclonalToPlot, order)
+
+
+
+ST1RNuccloneAlteredSameInAll <- ST1RNucCloneRes[!chr %in% c("X", "Y")&apply(ST1RNucCloneRes[, -c(1:3, 5)], 1, \(x) {
+  (all(x != 2)) && (length(unique(x)) == 1)
+}), c(1:5)]
+ST1RNuccloneAlteredSameInAllXY <- ST1RNucCloneRes[chr%in%c("X","Y")&apply(ST1RNucCloneRes[, -c(1:3, 5)], 1, \(x) {
+  (all(x != 1)) && (length(unique(x)) == 1)
+}), c(1:5)]
+
+setkey(ST1RNucSubclonalToPlot, chr, start, end)
+setkey(ST1RNuccloneAlteredSameInAll, chr, start, end)
+setkey(ST1RNuccloneAlteredSameInAllXY, chr, start, end)
+
+
+ST1RNucSubclonalToPlot[ST1RNuccloneAlteredSameInAll, Status := "Clonal CNV"]
+ST1RNucSubclonalToPlot[ST1RNuccloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(ST1RNucSubclonalToPlot, order)
+
+setkey(ST1RNucSubclonalToPlot, NULL)
+
+
+ST1RNuc_bin_level_CT_score <- melt(ST1RNucCTScores$CTData$CT_CellsBins[1,,drop=FALSE])
+colnames(ST1RNuc_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+ST1RNuc_bin_level_CT_score$Position <- as.character(ST1RNuc_bin_level_CT_score$Position)
+ST1RNuc_bin_level_CT_score$chr <- sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, ":"), '[[', 1)
+ST1RNuc_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+ST1RNuc_bin_level_CT_score$end <- as.numeric(sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, "-"), '[[', 2))
+ST1RNuc_bin_level_CT_score <- data.table(ST1RNuc_bin_level_CT_score)
+
+ST1RNuc_bin_level_CT_score <- merge(ST1RNuc_bin_level_CT_score, confidences.m[Sample=="ST1R_Nuclei"], )
+
+
+ST1RNucSubclonalToPlot[ST1RNuc_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+ST1RNucSubclonalToPlot[ST1RNuc_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+# 
+
+
+# ST1RNucSubclonalToPlot[ST1RNuc_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+ST1RNucSubclonalToPlot[ST1RNuc_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+
+
+
+
+ST1RNucSubclonalToPlot[apply(ST1RNucCTScores$CTData$CT_CellsBins[1, , drop = FALSE], 2, function(x) any(x > 0) && !all(x > 0)), ]$Status <- "Subclonal CT Event"
+
+ST1RNucSubclonalToPlot[apply(ST1RNucCTScores$CTData$CT_CellsBins[1, , drop=FALSE], 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(ST1RNucSubclonalToPlot$Status)
+ST1RNucSubclonalToPlot$Status <- factor(ST1RNucSubclonalToPlot$Status, levels = c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(ST1RNucSubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_Altered_Regions.csv")
+
+per_clone_status <- ST1RNuc_bin_level_CT_score[ST1RNucSubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_Altered_Regions_perclone.csv")
+
+```
+
+Lets plot this:
+
+```{r}
+
+sample.tmp <- "ST1R-Nuclei"
+
+ST1RNucSubclonalToPlot$chrXY <- ST1RNucSubclonalToPlot$chr
+ST1RNucSubclonalToPlot$chrXY <- factor(ST1RNucSubclonalToPlot$chrXY, levels = chromosomes)
+# ST1RNucSubclonalToPlot$order <- 1:length(ST1RNucSubclonalToPlot$chrXY)
+
+ST1RNucSubclonalToPlot$community <- "All"
+ST1RNucSubclonalToPlot$community <- as.character(ST1RNucSubclonalToPlot$community)
+# ST1RNucSubclonalToPlot$clone <- paste0("C", ST1RNucSubclonalToPlot$community)
+ST1RNucSubclonalToPlot$clone <- "All"
+ST1RNucSubclonalToPlot$Chromosome <- paste0(ST1RNucSubclonalToPlot$chr, ":", ST1RNucSubclonalToPlot$start, "-", ST1RNucSubclonalToPlot$end)
+# ST1RPDXSubclonalToPlot$Cells <- clone.tmp
+
+p.all.cells2.b<- ggplot(ST1RNucSubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(clone, order), fill=factor(Status))), dpi=300) +
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(ST1RNucSubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+
+
+
+## ST1RPDX
+
+
+```{r}
+
+
+ST1RPDXSubclonalToPlot <- ST1RPDXCloneRes[,c(1:3)]
+ST1RPDXSubclonalToPlot[,order:=.I]
+
+
+ST1RPDXSubclonalToPlot[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+ST1RPDXcloneDiffs <- ST1RPDXCloneRes[apply(ST1RPDXCloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:5)]
+
+setkey(ST1RPDXSubclonalToPlot, chr, start, end)
+setkey(ST1RPDXcloneDiffs, chr, start, end)
+
+ST1RPDXSubclonalToPlot[ST1RPDXcloneDiffs, Status := "Subclonal CNV"]
+setkey(ST1RPDXSubclonalToPlot, order)
+
+
+
+ST1RPDXcloneAlteredSameInAllXY <- ST1RPDXCloneRes[!chr%in%c("X","Y")&apply(ST1RPDXCloneRes[, -c(1:3)], 1, \(x) {(all(x!=2))&&(length(unique(x))==1)}), c(1:5)]
+ST1RPDXcloneAlteredSameInAll <- ST1RPDXCloneRes[chr%in%c("X","Y")&apply(ST1RPDXCloneRes[, -c(1:3)], 1, \(x) {(all(x!=1))&&(length(unique(x))==1)}), c(1:5)]
+
+setkey(ST1RPDXSubclonalToPlot, chr, start, end)
+setkey(ST1RPDXcloneAlteredSameInAll, chr, start, end)
+setkey(ST1RPDXcloneAlteredSameInAllXY, chr, start, end)
+
+
+ST1RPDXSubclonalToPlot[ST1RPDXcloneAlteredSameInAll, Status := "Clonal CNV"]
+ST1RPDXSubclonalToPlot[ST1RPDXcloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(ST1RPDXSubclonalToPlot, order)
+
+
+
+setkey(ST1RPDXSubclonalToPlot, NULL)
+
+
+ST1RPDX_bin_level_CT_score <- melt(ST1RPDXCTScores$CTData$CT_CellsBins)
+colnames(ST1RPDX_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+ST1RPDX_bin_level_CT_score$Position <- as.character(ST1RPDX_bin_level_CT_score$Position)
+ST1RPDX_bin_level_CT_score$chr <- sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, ":"), '[[', 1)
+ST1RPDX_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+ST1RPDX_bin_level_CT_score$end <- as.numeric(sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, "-"), '[[', 2))
+ST1RPDX_bin_level_CT_score <- data.table(ST1RPDX_bin_level_CT_score)
+
+ST1RPDX_bin_level_CT_score <- merge(ST1RPDX_bin_level_CT_score, confidences.m[Sample=="ST1RPDX"], )
+
+
+ST1RPDXSubclonalToPlot[ST1RPDX_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+
+ST1RPDXSubclonalToPlot[ST1RPDX_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+# 
+
+
+# ST1RPDXSubclonalToPlot[ST1RPDX_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+ST1RPDXSubclonalToPlot[ST1RPDX_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+
+
+
+# ST1RPDXSubclonalToPlot[apply(ST1RPDXCTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)), ]$Status <- "Subclonal CT Event"
+
+# ST1RPDXSubclonalToPlot[apply(ST1RPDXCTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(ST1RPDXSubclonalToPlot$Status)
+ST1RPDXSubclonalToPlot$Status <- factor(ST1RPDXSubclonalToPlot$Status, levels = c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(ST1RPDXSubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_Altered_Regions.csv")
+
+
+per_clone_status <- ST1RPDX_bin_level_CT_score[ST1RPDXSubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_Altered_Regions_perclone.csv")
+
+
+```
+
+Lets plot this:
+
+```{r}
+
+sample.tmp <- "ST1R-PDX"
+
+ST1RPDXSubclonalToPlot$chrXY <- ST1RPDXSubclonalToPlot$chr
+ST1RPDXSubclonalToPlot$chrXY <- factor(ST1RPDXSubclonalToPlot$chrXY, levels = chromosomes)
+# ST1RPDXSubclonalToPlot$order <- 1:length(ST1RPDXSubclonalToPlot$chrXY)
+
+ST1RPDXSubclonalToPlot$community <- "All"
+ST1RPDXSubclonalToPlot$community <- as.character(ST1RPDXSubclonalToPlot$community)
+# ST1RPDXSubclonalToPlot$clone <- paste0("C", ST1RPDXSubclonalToPlot$community)
+ST1RPDXSubclonalToPlot$clone <- "All"
+ST1RPDXSubclonalToPlot$Chromosome <- paste0(ST1RPDXSubclonalToPlot$chr, ":", ST1RPDXSubclonalToPlot$start, "-", ST1RPDXSubclonalToPlot$end)
+# ST1RPDXSubclonalToPlot$Cells <- clone.tmp
+
+p.all.cells2.b<- ggplot(ST1RPDXSubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(clone, order), fill=factor(Status))), dpi=300) +
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(ST1RPDXSubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+## RCMB18
+
+
+```{r}
+
+
+RCMB18SubclonalToPlot <- RCMB18CloneRes[,c(1:3)]
+RCMB18SubclonalToPlot[,order:=.I]
+
+
+RCMB18SubclonalToPlot[,Status := "Not Altered"]
+
+RCMB18cloneDiffs <- RCMB18CloneRes[apply(RCMB18CloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:4)]
+
+setkey(RCMB18SubclonalToPlot, chr, start, end)
+setkey(RCMB18cloneDiffs, chr, start, end)
+
+RCMB18SubclonalToPlot[RCMB18cloneDiffs, Status := "Subclonal CNV"]
+setkey(RCMB18SubclonalToPlot, order)
+
+
+
+RCMB18cloneAlteredSameInAll <- RCMB18CloneRes[!chr%in%c("X","Y")&apply(RCMB18CloneRes[, -c(1:3)], 1, \(x) {(all(x!=2))&&(length(unique(x))==1)}), c(1:4)]
+RCMB18cloneAlteredSameInAllXY <- RCMB18CloneRes[chr%in%c("X","Y")&apply(RCMB18CloneRes[, -c(1:3)], 1, \(x) {(all(x!=1))&&(length(unique(x))==1)}), c(1:4)]
+
+setkey(RCMB18SubclonalToPlot, chr, start, end)
+setkey(RCMB18cloneAlteredSameInAll, chr, start, end)
+setkey(RCMB18cloneAlteredSameInAllXY, chr, start, end)
+
+
+RCMB18SubclonalToPlot[RCMB18cloneAlteredSameInAll, Status := "Clonal CNV"]
+RCMB18SubclonalToPlot[RCMB18cloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(RCMB18SubclonalToPlot, order)
+
+
+setkey(RCMB18SubclonalToPlot, NULL)
+
+
+RCMB18_bin_level_CT_score <- melt(RCMB18CTScores$CTData$CT_CellsBins)
+colnames(RCMB18_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+RCMB18_bin_level_CT_score$Position <- as.character(RCMB18_bin_level_CT_score$Position)
+RCMB18_bin_level_CT_score$chr <- sapply(strsplit(RCMB18_bin_level_CT_score$Position, ":"), '[[', 1)
+RCMB18_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(RCMB18_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+RCMB18_bin_level_CT_score$end <- as.numeric(sapply(strsplit(RCMB18_bin_level_CT_score$Position, "-"), '[[', 2))
+RCMB18_bin_level_CT_score <- data.table(RCMB18_bin_level_CT_score)
+
+RCMB18_bin_level_CT_score <- merge(RCMB18_bin_level_CT_score, confidences.m[Sample=="RCMB18"], )
+
+
+RCMB18SubclonalToPlot[RCMB18_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal Low Confidence CT Event" ,on=.(chr, start,end)]
+
+RCMB18SubclonalToPlot[RCMB18_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+# 
+
+
+# RCMB18SubclonalToPlot[RCMB18_bin_level_CT_score[,any(CT>0) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := "Subclonal CT Event" ,on=.(chr, start,end)]
+
+
+RCMB18SubclonalToPlot[RCMB18_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := "Clonal CT Event" ,on=.(chr, start,end)]
+
+
+
+
+
+
+# RCMB18SubclonalToPlot[apply(RCMB18CTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)), ]$Status <- "Subclonal CT Event"
+
+# RCMB18SubclonalToPlot[apply(RCMB18CTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)), ]$Status <- "Clonal CT Event"
+
+
+table(RCMB18SubclonalToPlot$Status)
+RCMB18SubclonalToPlot$Status <- factor(RCMB18SubclonalToPlot$Status, levels = c("Not Altered", "Clonal CT Event", "Subclonal CT Event", "Clonal CNV", "Subclonal CNV", "Subclonal Low Confidence CT Event"))
+
+fwrite(RCMB18SubclonalToPlot, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_Altered_Regions.csv")
+
+per_clone_status <- RCMB18_bin_level_CT_score[RCMB18SubclonalToPlot, ,on=.(chr, start, end)]
+fwrite(per_clone_status, "~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_Altered_Regions_perclone.csv")
+
+
+
+```
+
+Lets plot this:
+
+```{r}
+
+sample.tmp <- "RCMB18"
+
+RCMB18SubclonalToPlot$chrXY <- RCMB18SubclonalToPlot$chr
+RCMB18SubclonalToPlot$chrXY <- factor(RCMB18SubclonalToPlot$chrXY, levels = chromosomes)
+# RCMB18SubclonalToPlot$order <- 1:length(RCMB18SubclonalToPlot$chrXY)
+
+RCMB18SubclonalToPlot$community <- "All"
+RCMB18SubclonalToPlot$community <- as.character(RCMB18SubclonalToPlot$community)
+# RCMB18SubclonalToPlot$clone <- paste0("C", RCMB18SubclonalToPlot$community)
+RCMB18SubclonalToPlot$clone <- "All"
+RCMB18SubclonalToPlot$Chromosome <- paste0(RCMB18SubclonalToPlot$chr, ":", RCMB18SubclonalToPlot$start, "-", RCMB18SubclonalToPlot$end)
+# RCMB18SubclonalToPlot$Cells <- clone.tmp
+
+p.all.cells2.b<- ggplot(RCMB18SubclonalToPlot) + 
+  ggrastr::rasterise(geom_tile(aes(x=reorder(Chromosome,order), 
+                                   y=reorder(clone, order), fill=factor(Status))), dpi=300) +
+  CNVchangeScale +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+        panel.spacing=unit(.0001, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8), 
+        strip.text.x = element_text(face="bold", size=0, colour = "black",),
+        strip.text.y = element_text(face="bold", size=0, colour = "black"),
+        strip.background = element_blank(),
+        # strip.background = element_rect(fill="white", colour="black", size =1), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), strip.text = element_text(size = 18),
+        plot.margin = margin(1,0.5,0.5,0.5, "cm")) +
+  facet_grid(factor(clone,levels = sort(unique(STPPDXSubclonalToPlot$clone)))~reorder(chrXY,order), switch = "y", scales="free", space="free") + ggExtra::removeGrid() + labs(x="", y="") +
+  NULL
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+p.all.cells2.b <- p.all.cells2.b+theme(legend.position="none")
+
+fig.file <- paste0(out.dir,'/', sample.tmp, '_subclonal_event_categories.heatmap.nolegend.pdf')
+pdf(file = fig.file, width = 45, height = 2.5)
+print(p.all.cells2.b)
+dev.off()
+
+
+```
+
+
+
+# Summary Plot:
+
+In this plot, we look at percent genome altered. This is different from above in that we only count the areas of CT events that are not actually copy number neutral/equal to the ploidy. 
+
+This means we need to recalculate all the above.
+
+
+## STP-Nuclei
+```{r}
+
+
+STPNucSubclonalToPlot2 <- STPNucCloneRes[,c(1:3)]
+STPNucSubclonalToPlot2[,order:=.I]
+
+
+STPNucSubclonalToPlot2[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+STPNuccloneDiffs <- STPNucCloneRes[apply(STPNucCloneRes[,-c(1:3,8)],1,\(x) length(unique(x)))>1,c(1:7)]
+
+setkey(STPNucSubclonalToPlot2, chr, start, end)
+setkey(STPNuccloneDiffs, chr, start, end)
+
+STPNucSubclonalToPlot2[STPNuccloneDiffs, Status := "Subclonal CNV"]
+setkey(STPNucSubclonalToPlot2, order)
+
+# Patient is a male
+STPNuccloneAlteredSameInAll <- STPNucCloneRes[!chr %in% c("X", "Y") & apply(STPNucCloneRes[, -c(1:3, 8)], 1, \(x) {
+  (all(x != 4)) && (length(unique(x)) == 1)
+}), c(1:7)]
+
+STPNuccloneAlteredSameInAllXY <- STPNucCloneRes[chr %in% c("X", "Y") & apply(STPNucCloneRes[, -c(1:3, 8)], 1, \(x) {
+  (all(x != 2)) && (length(unique(x)) == 1)
+}), c(1:7)]
+
+
+setkey(STPNucSubclonalToPlot2, chr, start, end)
+setkey(STPNuccloneAlteredSameInAll, chr, start, end)
+setkey(STPNuccloneAlteredSameInAllXY, chr, start, end)
+
+
+STPNucSubclonalToPlot2[STPNuccloneAlteredSameInAll, Status := "Clonal CNV"]
+STPNucSubclonalToPlot2[STPNuccloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(STPNucSubclonalToPlot2, order)
+# 
+# 
+# ## Removing Normal clone
+# ## Here the clonal CNVs are excluded because otherwise we will count the regions that had a clonal CNV and then subclonal CT 
+# STPNucSubclonalToPlot2[apply(STPNucCTScores$CTData$CT_CellsBins[1:4,], 2, function(x) any(x>0) && !all(x>0)) & Status %in% c("Subclonal CNV"),]$Status <- "Subclonal CT Event"
+# 
+# myx <- STPNucSubclonalToPlot2[chr==12&Status%in% c("Subclonal CNV")]$order
+# 
+# ## Removing Normal clone
+# ## Here we allow for clonal or subclonal as after a clonal CT event, further subclonal CNVs are possible (for example, amp. of the non CT copy of the DNA) 
+# STPNucSubclonalToPlot2[apply(STPNucCTScores$CTData$CT_CellsBins[1:4,], 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+
+
+setkey(STPNucSubclonalToPlot2, NULL)
+
+STPNuc_bin_level_CT_score <- melt(STPNucCTScores$CTData$CT_CellsBins[1:4,])
+colnames(STPNuc_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+STPNuc_bin_level_CT_score$Position <- as.character(STPNuc_bin_level_CT_score$Position)
+STPNuc_bin_level_CT_score$chr <- sapply(strsplit(STPNuc_bin_level_CT_score$Position, ":"), '[[', 1)
+STPNuc_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(STPNuc_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+STPNuc_bin_level_CT_score$end <- as.numeric(sapply(strsplit(STPNuc_bin_level_CT_score$Position, "-"), '[[', 2))
+STPNuc_bin_level_CT_score <- data.table(STPNuc_bin_level_CT_score)
+
+STPNuc_bin_level_CT_score <- merge(STPNuc_bin_level_CT_score, confidences.m[Sample=="STP-Nuclei"], )
+
+
+STPNucSubclonalToPlot2[STPNuc_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+STPNucSubclonalToPlot2[STPNuc_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+STPNucSubclonalToPlot2[STPNuc_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+
+
+
+prop.table(table(STPNucSubclonalToPlot2$Status))
+sum(prop.table(table(STPNucSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+```
+
+
+## STP-PDX
+
+```{r}
+
+
+STPPDXSubclonalToPlot2 <- STPPDXCloneRes[,c(1:3)]
+STPPDXSubclonalToPlot2[,order:=.I]
+
+
+STPPDXSubclonalToPlot2[,Status := "Not Altered"]
+
+STPPDXcloneDiffs <- STPPDXCloneRes[apply(STPPDXCloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:8)]
+
+setkey(STPPDXSubclonalToPlot2, chr, start, end)
+setkey(STPPDXcloneDiffs, chr, start, end)
+
+STPPDXSubclonalToPlot2[STPPDXcloneDiffs, Status := "Subclonal CNV"]
+setkey(STPPDXSubclonalToPlot2, order)
+
+
+STPPDXcloneAlteredSameInAll <- STPPDXCloneRes[!chr%in%c("X","Y")&apply(STPPDXCloneRes[, -c(1:3)], 1, \(x) {(all(x!=4))&&(length(unique(x))==1)}), c(1:8)]
+
+STPPDXcloneAlteredSameInAllXY <- STPPDXCloneRes[chr%in%c("X","Y")&apply(STPPDXCloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != 1)) && (length(unique(x)) == 1)
+}), c(1:8)]
+
+
+setkey(STPPDXSubclonalToPlot2, chr, start, end)
+setkey(STPPDXcloneAlteredSameInAll, chr, start, end)
+setkey(STPPDXcloneAlteredSameInAllXY, chr, start, end)
+
+
+STPPDXSubclonalToPlot2[STPPDXcloneAlteredSameInAll, Status := "Clonal CNV"]
+STPPDXSubclonalToPlot2[STPPDXcloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(STPPDXSubclonalToPlot2, order)
+# 
+# STPPDXSubclonalToPlot2[apply(STPPDXCTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)) & Status %in% c("Subclonal CNV"), ]$Status <- "Subclonal CT Event"
+# 
+# STPPDXSubclonalToPlot2[apply(STPPDXCTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+setkey(STPPDXSubclonalToPlot2, NULL)
+
+STPPDX_bin_level_CT_score <- melt(STPPDXCTScores$CTData$CT_CellsBins)
+colnames(STPPDX_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+STPPDX_bin_level_CT_score$Position <- as.character(STPPDX_bin_level_CT_score$Position)
+STPPDX_bin_level_CT_score$chr <- sapply(strsplit(STPPDX_bin_level_CT_score$Position, ":"), '[[', 1)
+STPPDX_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(STPPDX_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+STPPDX_bin_level_CT_score$end <- as.numeric(sapply(strsplit(STPPDX_bin_level_CT_score$Position, "-"), '[[', 2))
+STPPDX_bin_level_CT_score <- data.table(STPPDX_bin_level_CT_score)
+
+STPPDX_bin_level_CT_score <- merge(STPPDX_bin_level_CT_score, confidences.m[Sample=="STP-PDX"], )
+
+
+STPPDXSubclonalToPlot2[STPPDX_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+STPPDXSubclonalToPlot2[STPPDX_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+STPPDXSubclonalToPlot2[STPPDX_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+
+
+
+prop.table(table(STPPDXSubclonalToPlot2$Status))
+sum(prop.table(table(STPPDXSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+```
+
+
+## MB243
+
+```{r}
+
+MB243SubclonalToPlot2 <- MB243CloneRes[, c(1:3)]
+MB243SubclonalToPlot2[, order := .I]
+
+
+MB243SubclonalToPlot2[, Status := "Not Altered"]
+
+MB243cloneDiffs <- MB243CloneRes[apply(MB243CloneRes[, -c(1:3)], 1, \(x) sum(x != c(3, 4, 4, 4))) > 1, c(1:7)]
+
+setkey(MB243SubclonalToPlot2, chr, start, end)
+setkey(MB243cloneDiffs, chr, start, end)
+
+MB243SubclonalToPlot2[MB243cloneDiffs, Status := "Subclonal CNV"]
+setkey(MB243SubclonalToPlot2, order)
+
+
+
+MB243cloneAlteredSameInAll <- MB243CloneRes[!chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) {(all(x!=c(3,4,4,4)))}), c(1:7)]
+MB243cloneAlteredSameInAllXY <- MB243CloneRes[chr %in% c("X", "Y")&apply(MB243CloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != c(2, 2, 2, 2))) # A bit awkward here???
+}), c(1:7)]
+
+setkey(MB243SubclonalToPlot2, chr, start, end)
+setkey(MB243cloneAlteredSameInAll, chr, start, end)
+setkey(MB243cloneAlteredSameInAllXY, chr, start, end)
+
+
+MB243SubclonalToPlot2[MB243cloneAlteredSameInAll, Status := "Clonal CNV"]
+MB243SubclonalToPlot2[MB243cloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(MB243SubclonalToPlot2, order)
+# 
+# MB243SubclonalToPlot2[apply(MB243CTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)) & Status %in% c("Subclonal CNV"), ]$Status <- "Subclonal CT Event"
+# 
+# MB243SubclonalToPlot2[apply(MB243CTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+setkey(MB243SubclonalToPlot2, NULL)
+
+MB243_bin_level_CT_score <- melt(MB243CTScores$CTData$CT_CellsBins)
+colnames(MB243_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+MB243_bin_level_CT_score$Position <- as.character(MB243_bin_level_CT_score$Position)
+MB243_bin_level_CT_score$chr <- sapply(strsplit(MB243_bin_level_CT_score$Position, ":"), '[[', 1)
+MB243_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(MB243_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+MB243_bin_level_CT_score$end <- as.numeric(sapply(strsplit(MB243_bin_level_CT_score$Position, "-"), '[[', 2))
+MB243_bin_level_CT_score <- data.table(MB243_bin_level_CT_score)
+
+MB243_bin_level_CT_score <- merge(MB243_bin_level_CT_score, confidences.m[Sample=="MB243"], )
+
+
+MB243SubclonalToPlot2[MB243_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+MB243SubclonalToPlot2[MB243_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+MB243SubclonalToPlot2[MB243_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+
+prop.table(table(MB243SubclonalToPlot2$Status))
+sum(prop.table(table(MB243SubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+
+```
+
+
+## ST1R-Nuclei
+
+```{r}
+
+
+ST1RNucSubclonalToPlot2 <- ST1RNucCloneRes[,c(1:3)]
+ST1RNucSubclonalToPlot2[,order:=.I]
+
+
+ST1RNucSubclonalToPlot2[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+ST1RNuccloneDiffs <- ST1RNucCloneRes[apply(ST1RNucCloneRes[,-c(1:3,5)],1,\(x) length(unique(x)))>1,c(1:5)]
+
+setkey(ST1RNucSubclonalToPlot2, chr, start, end)
+setkey(ST1RNuccloneDiffs, chr, start, end)
+
+ST1RNucSubclonalToPlot2[ST1RNuccloneDiffs, Status := "Subclonal CNV"]
+setkey(ST1RNucSubclonalToPlot2, order)
+
+ST1RNuccloneAlteredSameInAll <- ST1RNucCloneRes[!chr %in% c("X", "Y") & apply(ST1RNucCloneRes[, -c(1:3, 5)], 1, \(x) {
+  (all(x != 2)) && (length(unique(x)) == 1)
+}), c(1:5)]
+ST1RNuccloneAlteredSameInAllXY <- ST1RNucCloneRes[chr %in% c("X", "Y") & apply(ST1RNucCloneRes[, -c(1:3, 5)], 1, \(x) {
+  (all(x != 1)) && (length(unique(x)) == 1)
+}), c(1:5)]
+
+setkey(ST1RNucSubclonalToPlot2, chr, start, end)
+setkey(ST1RNuccloneAlteredSameInAll, chr, start, end)
+setkey(ST1RNuccloneAlteredSameInAllXY, chr, start, end)
+
+
+ST1RNucSubclonalToPlot2[ST1RNuccloneAlteredSameInAll, Status := "Clonal CNV"]
+ST1RNucSubclonalToPlot2[ST1RNuccloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+setkey(ST1RNucSubclonalToPlot2, order)
+
+# ST1RNucSubclonalToPlot2[apply(ST1RNucCTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)) & Status %in% c("Subclonal CNV"), ]$Status <- "Subclonal CT Event"
+# 
+# ST1RNucSubclonalToPlot2[apply(ST1RNucCTScores$CTData$CT_CellsBins[1,,drop=FALSE], 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+
+setkey(ST1RNucSubclonalToPlot2, NULL)
+
+ST1RNuc_bin_level_CT_score <- melt(ST1RNucCTScores$CTData$CT_CellsBins[1,, drop=FALSE])
+colnames(ST1RNuc_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+ST1RNuc_bin_level_CT_score$Position <- as.character(ST1RNuc_bin_level_CT_score$Position)
+ST1RNuc_bin_level_CT_score$chr <- sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, ":"), '[[', 1)
+ST1RNuc_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+ST1RNuc_bin_level_CT_score$end <- as.numeric(sapply(strsplit(ST1RNuc_bin_level_CT_score$Position, "-"), '[[', 2))
+ST1RNuc_bin_level_CT_score <- data.table(ST1RNuc_bin_level_CT_score)
+
+ST1RNuc_bin_level_CT_score <- merge(ST1RNuc_bin_level_CT_score, confidences.m[Sample=="ST1R_Nuclei"], )
+
+
+ST1RNucSubclonalToPlot2[ST1RNuc_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+ST1RNucSubclonalToPlot2[ST1RNuc_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+ST1RNucSubclonalToPlot2[ST1RNuc_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+
+prop.table(table(ST1RNucSubclonalToPlot2$Status))
+
+
+```
+
+
+
+## ST1R-PDX
+
+```{r}
+
+
+ST1RPDXSubclonalToPlot2 <- ST1RPDXCloneRes[,c(1:3)]
+ST1RPDXSubclonalToPlot2[,order:=.I]
+
+
+ST1RPDXSubclonalToPlot2[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+ST1RPDXcloneDiffs <- ST1RPDXCloneRes[apply(ST1RPDXCloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:5)]
+
+setkey(ST1RPDXSubclonalToPlot2, chr, start, end)
+setkey(ST1RPDXcloneDiffs, chr, start, end)
+
+ST1RPDXSubclonalToPlot2[ST1RPDXcloneDiffs, Status := "Subclonal CNV"]
+setkey(ST1RPDXSubclonalToPlot2, order)
+
+
+ST1RPDXcloneAlteredSameInAllXY <- ST1RPDXCloneRes[!chr %in% c("X", "Y") & apply(ST1RPDXCloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != 2)) && (length(unique(x)) == 1)
+}), c(1:5)]
+ST1RPDXcloneAlteredSameInAll <- ST1RPDXCloneRes[chr %in% c("X", "Y") & apply(ST1RPDXCloneRes[, -c(1:3)], 1, \(x) {
+  (all(x != 1)) && (length(unique(x)) == 1)
+}), c(1:5)]
+
+setkey(ST1RPDXSubclonalToPlot2, chr, start, end)
+setkey(ST1RPDXcloneAlteredSameInAll, chr, start, end)
+setkey(ST1RPDXcloneAlteredSameInAllXY, chr, start, end)
+
+
+ST1RPDXSubclonalToPlot2[ST1RPDXcloneAlteredSameInAll, Status := "Clonal CNV"]
+ST1RPDXSubclonalToPlot2[ST1RPDXcloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+ST1RPDXSubclonalToPlot2[ST1RPDXcloneAlteredSameInAll, Status := "Clonal CNV"]
+
+setkey(ST1RPDXSubclonalToPlot2, order)
+# 
+# ST1RPDXSubclonalToPlot2[apply(ST1RPDXCTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)) & Status %in% c("Subclonal CNV"), ]$Status <- "Subclonal CT Event"
+# 
+# ST1RPDXSubclonalToPlot2[apply(ST1RPDXCTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+setkey(ST1RPDXSubclonalToPlot2, NULL)
+
+ST1RPDX_bin_level_CT_score <- melt(ST1RPDXCTScores$CTData$CT_CellsBins)
+colnames(ST1RPDX_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+ST1RPDX_bin_level_CT_score$Position <- as.character(ST1RPDX_bin_level_CT_score$Position)
+ST1RPDX_bin_level_CT_score$chr <- sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, ":"), '[[', 1)
+ST1RPDX_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+ST1RPDX_bin_level_CT_score$end <- as.numeric(sapply(strsplit(ST1RPDX_bin_level_CT_score$Position, "-"), '[[', 2))
+ST1RPDX_bin_level_CT_score <- data.table(ST1RPDX_bin_level_CT_score)
+
+ST1RPDX_bin_level_CT_score <- merge(ST1RPDX_bin_level_CT_score, confidences.m[Sample=="ST1RPDX"], )
+
+
+ST1RPDXSubclonalToPlot2[ST1RPDX_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+ST1RPDXSubclonalToPlot2[ST1RPDX_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+ST1RPDXSubclonalToPlot2[ST1RPDX_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+
+prop.table(table(ST1RPDXSubclonalToPlot2$Status))
+sum(prop.table(table(ST1RPDXSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+ST1RPDXSubclonalToPlot2[ST1RPDXSubclonalToPlot2[Status=='Subclonal CT Event'],,on=.(chr,start,end)][,table(Status)]
+
+```
+
+
+## RCMB18
+
+```{r}
+
+
+RCMB18SubclonalToPlot2 <- RCMB18CloneRes[,c(1:3)]
+RCMB18SubclonalToPlot2[,order:=.I]
+
+
+RCMB18SubclonalToPlot2[,Status := "Not Altered"]
+
+# Removing Normal clone for this analysis
+RCMB18cloneDiffs <- RCMB18CloneRes[apply(RCMB18CloneRes[,-c(1:3)],1,\(x) length(unique(x)))>1,c(1:4)]
+
+setkey(RCMB18SubclonalToPlot2, chr, start, end)
+setkey(RCMB18cloneDiffs, chr, start, end)
+
+RCMB18SubclonalToPlot2[RCMB18cloneDiffs, Status := "Subclonal CNV"]
+setkey(RCMB18SubclonalToPlot2, order)
+
+
+RCMB18cloneAlteredSameInAll <- RCMB18CloneRes[!chr%in%c("X","Y")&apply(RCMB18CloneRes[, -c(1:3)], 1, \(x) {(all(x!=2))&&(length(unique(x))==1)}), c(1:4)]
+RCMB18cloneAlteredSameInAllXY <- RCMB18CloneRes[chr%in%c("X","Y")&apply(RCMB18CloneRes[, -c(1:3)], 1, \(x) {(all(x!=1))&&(length(unique(x))==1)}), c(1:4)]
+
+setkey(RCMB18SubclonalToPlot2, chr, start, end)
+setkey(RCMB18cloneAlteredSameInAll, chr, start, end)
+setkey(RCMB18cloneAlteredSameInAllXY, chr, start, end)
+
+
+RCMB18SubclonalToPlot2[RCMB18cloneAlteredSameInAll, Status := "Clonal CNV"]
+RCMB18SubclonalToPlot2[RCMB18cloneAlteredSameInAllXY, Status := "Clonal CNV"]
+
+
+RCMB18SubclonalToPlot2[RCMB18cloneAlteredSameInAll, Status := "Clonal CNV"]
+
+setkey(RCMB18SubclonalToPlot2, order)
+
+# RCMB18SubclonalToPlot2[apply(RCMB18CTScores$CTData$CT_CellsBins, 2, function(x) any(x > 0) && !all(x > 0)) & Status %in% c("Subclonal CNV"), ]$Status <- "Subclonal CT Event"
+# 
+# RCMB18SubclonalToPlot2[apply(RCMB18CTScores$CTData$CT_CellsBins, 2, function(x) all(x > 0)) & Status %in% c("Subclonal CNV", "Clonal CNV"), ]$Status <- "Clonal CT Event"
+
+
+setkey(RCMB18SubclonalToPlot2, NULL)
+
+RCMB18_bin_level_CT_score <- melt(RCMB18CTScores$CTData$CT_CellsBins)
+colnames(RCMB18_bin_level_CT_score) <- c("Clone", "Position", "CT")
+
+RCMB18_bin_level_CT_score$Position <- as.character(RCMB18_bin_level_CT_score$Position)
+RCMB18_bin_level_CT_score$chr <- sapply(strsplit(RCMB18_bin_level_CT_score$Position, ":"), '[[', 1)
+RCMB18_bin_level_CT_score$start <- as.numeric(sapply(strsplit(sapply(strsplit(RCMB18_bin_level_CT_score$Position, "-"), '[[', 1), ":"), '[[', 2))
+RCMB18_bin_level_CT_score$end <- as.numeric(sapply(strsplit(RCMB18_bin_level_CT_score$Position, "-"), '[[', 2))
+RCMB18_bin_level_CT_score <- data.table(RCMB18_bin_level_CT_score)
+
+RCMB18_bin_level_CT_score <- merge(RCMB18_bin_level_CT_score, confidences.m[Sample=="RCMB18"], )
+
+
+RCMB18SubclonalToPlot2[RCMB18_bin_level_CT_score[,any(CT>0 & value<confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal Low Confidence CT Event",Status) ,on=.(chr, start,end)]
+
+RCMB18SubclonalToPlot2[RCMB18_bin_level_CT_score[,any(CT>0 & value>confidence.threshold) && !all(CT>0) , .(chr, start, end)][V1==TRUE], Status := ifelse(Status=='Subclonal CNV',"Subclonal CT Event",Status) ,on=.(chr, start,end)]
+RCMB18SubclonalToPlot2[RCMB18_bin_level_CT_score[,all(CT>0), .(chr, start, end)][V1==TRUE], Status := ifelse(Status %in% c("Subclonal CNV", "Clonal CNV"),"Clonal CT Event",Status) ,on=.(chr, start,end)]
+
+table(RCMB18SubclonalToPlot2$Status)
+
+
+```
+
+Lets print out statistics necessary for the text:
+
+```{r}
+
+prop.table(table(STPNucSubclonalToPlot2$Status))
+sum(prop.table(table(STPNucSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+prop.table(table(STPPDXSubclonalToPlot2$Status))
+sum(prop.table(table(STPPDXSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+prop.table(table(MB243SubclonalToPlot2$Status))
+sum(prop.table(table(MB243SubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+
+prop.table(table(ST1RNucSubclonalToPlot2$Status))
+
+
+prop.table(table(ST1RPDXSubclonalToPlot2$Status))
+sum(prop.table(table(ST1RPDXSubclonalToPlot2$Status))[c("Subclonal CNV", "Subclonal CT Event")])
+
+
+prop.table(table(RCMB18SubclonalToPlot2$Status))
+
+
+```
+
+```{r}
+
+toPlot <- rbind(cbind(reshape2::melt(table(ST1RPDXSubclonalToPlot2$Status)), "Sample" = "LFS-MB1R PDX"), 
+                cbind(reshape2::melt(table(MB243SubclonalToPlot2$Status)), "Sample" = "MB243P Nuclei"), 
+                cbind(reshape2::melt(table(STPPDXSubclonalToPlot2$Status)), "Sample" = "LFS-MBP PDX"), 
+                cbind(reshape2::melt(table(STPNucSubclonalToPlot2$Status)), "Sample" = "LFS-MBP Nuclei"),
+                cbind(reshape2::melt(table(ST1RNucSubclonalToPlot2$Status)), "Sample" = "LFS-MB1R Nuclei"),
+                cbind(reshape2::melt(table(RCMB18SubclonalToPlot2$Status)), "Sample" = "RCMB18 PDX"))
+
+toPlot$Sample <- factor(toPlot$Sample, levels=rev(c("LFS-MBP Nuclei", "LFS-MBP PDX", "LFS-MB1R Nuclei", "LFS-MB1R PDX", "MB243P Nuclei", "RCMB18 PDX")))
+
+sumSubclonalPlot <- ggplot(toPlot[toPlot$Var1!="Not Altered",], aes(x=Sample, y=value/nrow(STPNucCloneRes), fill=Var1)) + 
+  geom_col(width=0.5)+
+  CNVchangeScale +
+  ylab("Percent Genome Altered") + theme_classic() +
+  ylim(c(0,100)) + theme(legend.position = "none", axis.text.x = element_text(angle=90, hjust=1, vjust=0.5, size=2)) + coord_flip() + 
+  scale_x_discrete(position = "top") + scale_y_continuous(labels = scales::percent)
+
+
+fig.file <- paste0(out.dir,'/', 'Subclonal_event_summary_plot.pdf')
+pdf(file = fig.file, width = 4, height = 2.5)
+print(sumSubclonalPlot)
+dev.off()
+
+
+
+fig.file <- paste0(out.dir,'/', 'Subclonal_event_summary_plot.png')
+png(file = fig.file, width = 4, height = 2.5, units="in", res=600)
+print(sumSubclonalPlot)
+dev.off()
+
+```
+
+# Calculating percentages of events
+
+## STP Nuclei
+```{r}
+
+
+library(GenomicRanges)
+
+STPNucCloneRes[,order:=.I]
+
+STPNucSubclonalCNVs <-STPNucSubclonalToPlot2[Status == "Subclonal CNV"]
+setkey(STPNucCloneRes, chr, start, end)
+setkey(STPNucSubclonalCNVs, chr, start, end)
+STPNucSubclonalCNVs <- as.data.frame(STPNucCloneRes[STPNucSubclonalCNVs])
+STPNucSubclonalCNVsSplit <- split(STPNucSubclonalCNVs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+STPNucSubclonalCNVsSplit <- STPNucSubclonalCNVsSplit[sapply(STPNucSubclonalCNVsSplit, nrow) > 0]
+
+STPNucSubclonalCNVEvents <- purrr::reduce(sapply(STPNucSubclonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+STPNucClonalCNVs <-STPNucSubclonalToPlot2[Status == "Clonal CNV"]
+setkey(STPNucCloneRes, chr, start, end)
+setkey(STPNucClonalCNVs, chr, start, end)
+STPNucClonalCNVs <- as.data.frame(STPNucCloneRes[STPNucClonalCNVs])
+STPNucClonalCNVsSplit <- split(STPNucClonalCNVs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+STPNucClonalCNVsSplit <- STPNucClonalCNVsSplit[sapply(STPNucClonalCNVsSplit, nrow) > 0]
+
+STPNucClonalCNVEvents <- purrr::reduce(sapply(STPNucClonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+STPNucSubclonalCT <-STPNucSubclonalToPlot2[Status == "Subclonal CT Event"]
+setkey(STPNucCloneRes, chr, start, end)
+setkey(STPNucSubclonalCT, chr, start, end)
+STPNucSubclonalCT <- as.data.frame(STPNucCloneRes[STPNucSubclonalCT])
+STPNucSubclonalCTSplit <- split(STPNucSubclonalCT, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+STPNucSubclonalCTSplit <- STPNucSubclonalCTSplit[sapply(STPNucSubclonalCTSplit, nrow) > 0]
+
+STPNucSubclonalCTEvents <- purrr::reduce(sapply(STPNucSubclonalCTSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+STPNucClonalCT <- STPNucSubclonalToPlot2[Status == "Clonal CT Event"]
+setkey(STPNucCloneRes, chr, start, end)
+setkey(STPNucClonalCT, chr, start, end)
+STPNucClonalCTs <- as.data.frame(STPNucCloneRes[STPNucClonalCT])
+STPNucClonalCTsSplit <- split(STPNucClonalCTs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+STPNucClonalCTsSplit <- STPNucClonalCTsSplit[sapply(STPNucClonalCTsSplit, nrow) > 0]
+
+STPNucClonalCTEvents <- purrr::reduce(sapply(STPNucClonalCTsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+length(STPNucSubclonalCTEvents)/(length(STPNucSubclonalCTEvents) + length(STPNucSubclonalCNVEvents))
+
+(length(STPNucSubclonalCTEvents) + length(STPNucClonalCTEvents))/(length(STPNucSubclonalCTEvents) + length(STPNucSubclonalCNVEvents) + length(STPNucClonalCTEvents) + length(STPNucClonalCNVEvents))
+
+setkey(STPNucCloneRes, order)
+
+
+```
+
+
+## STP PDX
+```{r}
+
+library(GenomicRanges)
+
+STPPDXCloneRes[,order:=.I]
+
+
+STPPDXSubclonalCNVs <-STPPDXSubclonalToPlot2[Status == "Subclonal CNV"]
+setkey(STPPDXCloneRes, chr, start, end)
+setkey(STPPDXSubclonalCNVs, chr, start, end)
+STPPDXSubclonalCNVs <- as.data.frame(STPPDXCloneRes[STPPDXSubclonalCNVs])
+STPPDXSubclonalCNVsSplit <- split(STPPDXSubclonalCNVs, f = ~ Clone_1 + Clone_2 + Clone_3 + Clone_4 + Clone_5)
+STPPDXSubclonalCNVsSplit <- STPPDXSubclonalCNVsSplit[sapply(STPPDXSubclonalCNVsSplit, nrow) > 0]
+
+STPPDXSubclonalCNVEvents <- purrr::reduce(sapply(STPPDXSubclonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+STPPDXClonalCNVs <-STPPDXSubclonalToPlot2[Status == "Clonal CNV"]
+setkey(STPPDXCloneRes, chr, start, end)
+setkey(STPPDXClonalCNVs, chr, start, end)
+STPPDXClonalCNVs <- as.data.frame(STPPDXCloneRes[STPPDXClonalCNVs])
+STPPDXClonalCNVsSplit <- split(STPPDXClonalCNVs, f = ~ Clone_1 + Clone_2 + Clone_3 + Clone_4 + Clone_5)
+STPPDXClonalCNVsSplit <- STPPDXClonalCNVsSplit[sapply(STPPDXClonalCNVsSplit, nrow) > 0]
+
+STPPDXClonalCNVEvents <- purrr::reduce(sapply(STPPDXClonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+STPPDXSubclonalCT <-STPPDXSubclonalToPlot2[Status == "Subclonal CT Event"]
+setkey(STPPDXCloneRes, chr, start, end)
+setkey(STPPDXSubclonalCT, chr, start, end)
+STPPDXSubclonalCT <- as.data.frame(STPPDXCloneRes[STPPDXSubclonalCT])
+STPPDXSubclonalCTSplit <- split(STPPDXSubclonalCT, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4 + Clone_5)
+STPPDXSubclonalCTSplit <- STPPDXSubclonalCTSplit[sapply(STPPDXSubclonalCTSplit, nrow) > 0]
+
+STPPDXSubclonalCTEvents <- purrr::reduce(sapply(STPPDXSubclonalCTSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+STPPDXClonalCTs <-STPPDXSubclonalToPlot2[Status == "Clonal CT Event"]
+setkey(STPPDXCloneRes, chr, start, end)
+setkey(STPPDXClonalCTs, chr, start, end)
+STPPDXClonalCTs <- as.data.frame(STPPDXCloneRes[STPPDXClonalCTs])
+STPPDXClonalCTsSplit <- split(STPPDXClonalCTs, f = ~ Clone_1 + Clone_2 + Clone_3 + Clone_4 + Clone_5)
+STPPDXClonalCTsSplit <- STPPDXClonalCTsSplit[sapply(STPPDXClonalCTsSplit, nrow) > 0]
+
+STPPDXClonalCTEvents <- purrr::reduce(sapply(STPPDXClonalCTsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+length(STPPDXSubclonalCTEvents)/(length(STPPDXSubclonalCTEvents) + length(STPPDXSubclonalCNVEvents))
+
+setkey(STPPDXCloneRes, order)
+
+
+```
+
+
+## ST1R PDX
+```{r}
+
+library(GenomicRanges)
+
+ST1RPDXCloneRes[,order:=.I]
+
+ST1RPDXSubclonalCNVs <-ST1RPDXSubclonalToPlot2[Status == "Subclonal CNV"]
+setkey(ST1RPDXCloneRes, chr, start, end)
+setkey(ST1RPDXSubclonalCNVs, chr, start, end)
+ST1RPDXSubclonalCNVs <- as.data.frame(ST1RPDXCloneRes[ST1RPDXSubclonalCNVs])
+ST1RPDXSubclonalCNVsSplit <- split(ST1RPDXSubclonalCNVs, f=~Clone_1 + Clone_2 + Clone_3)
+ST1RPDXSubclonalCNVsSplit <- ST1RPDXSubclonalCNVsSplit[sapply(ST1RPDXSubclonalCNVsSplit, nrow) > 0]
+
+ST1RPDXSubclonalCNVEvents <- purrr::reduce(sapply(ST1RPDXSubclonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+ST1RPDXClonalCNVs <-ST1RPDXSubclonalToPlot2[Status == "Clonal CNV"]
+setkey(ST1RPDXCloneRes, chr, start, end)
+setkey(ST1RPDXClonalCNVs, chr, start, end)
+ST1RPDXClonalCNVs <- as.data.frame(ST1RPDXCloneRes[ST1RPDXClonalCNVs])
+ST1RPDXClonalCNVsSplit <- split(ST1RPDXClonalCNVs, f=~Clone_1 + Clone_2 + Clone_3)
+ST1RPDXClonalCNVsSplit <- ST1RPDXClonalCNVsSplit[sapply(ST1RPDXClonalCNVsSplit, nrow) > 0]
+
+ST1RPDXClonalCNVEvents <- purrr::reduce(sapply(ST1RPDXClonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+ST1RPDXSubclonalCT <-ST1RPDXSubclonalToPlot2[Status == "Subclonal CT Event"]
+setkey(ST1RPDXCloneRes, chr, start, end)
+setkey(ST1RPDXSubclonalCT, chr, start, end)
+ST1RPDXSubclonalCT <- as.data.frame(ST1RPDXCloneRes[ST1RPDXSubclonalCT])
+ST1RPDXSubclonalCTSplit <- split(ST1RPDXSubclonalCT, f=~Clone_1 + Clone_2 + Clone_3)
+ST1RPDXSubclonalCTSplit <- ST1RPDXSubclonalCTSplit[sapply(ST1RPDXSubclonalCTSplit, nrow) > 0]
+
+ST1RPDXSubclonalCTEvents <- purrr::reduce(sapply(ST1RPDXSubclonalCTSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+ST1RPDXClonalCTs <-ST1RPDXSubclonalToPlot2[Status == "Clonal CT Event"]
+setkey(ST1RPDXCloneRes, chr, start, end)
+setkey(ST1RPDXClonalCTs, chr, start, end)
+ST1RPDXClonalCTs <- as.data.frame(ST1RPDXCloneRes[ST1RPDXClonalCTs])
+ST1RPDXClonalCTsSplit <- split(ST1RPDXClonalCTs, f=~Clone_1 + Clone_2 + Clone_3)
+ST1RPDXClonalCTsSplit <- ST1RPDXClonalCTsSplit[sapply(ST1RPDXClonalCTsSplit, nrow) > 0]
+
+ST1RPDXClonalCTEvents <- purrr::reduce(sapply(ST1RPDXClonalCTsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+length(ST1RPDXSubclonalCTEvents)/(length(ST1RPDXSubclonalCTEvents) + length(ST1RPDXSubclonalCNVEvents))
+
+setkey(ST1RPDXCloneRes, order)
+
+
+```
+
+
+
+## MB243
+```{r}
+
+library(GenomicRanges)
+
+MB243CloneRes[,order:=.I]
+
+MB243SubclonalCNVs <-MB243SubclonalToPlot2[Status == "Subclonal CNV"]
+setkey(MB243CloneRes, chr, start, end)
+setkey(MB243SubclonalCNVs, chr, start, end)
+MB243SubclonalCNVs <- as.data.frame(MB243CloneRes[MB243SubclonalCNVs])
+MB243SubclonalCNVsSplit <- split(MB243SubclonalCNVs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+MB243SubclonalCNVsSplit <- MB243SubclonalCNVsSplit[sapply(MB243SubclonalCNVsSplit, nrow) > 0]
+
+MB243SubclonalCNVEvents <- purrr::reduce(sapply(MB243SubclonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+MB243ClonalCNVs <-MB243SubclonalToPlot2[Status == "Clonal CNV"]
+setkey(MB243CloneRes, chr, start, end)
+setkey(MB243ClonalCNVs, chr, start, end)
+MB243ClonalCNVs <- as.data.frame(MB243CloneRes[MB243ClonalCNVs])
+MB243ClonalCNVsSplit <- split(MB243ClonalCNVs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+MB243ClonalCNVsSplit <- MB243ClonalCNVsSplit[sapply(MB243ClonalCNVsSplit, nrow) > 0]
+
+MB243ClonalCNVEvents <- purrr::reduce(sapply(MB243ClonalCNVsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+MB243SubclonalCT <-MB243SubclonalToPlot2[Status == "Subclonal CT Event"]
+setkey(MB243CloneRes, chr, start, end)
+setkey(MB243SubclonalCT, chr, start, end)
+MB243SubclonalCT <- as.data.frame(MB243CloneRes[MB243SubclonalCT])
+MB243SubclonalCTSplit <- split(MB243SubclonalCT, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+MB243SubclonalCTSplit <- MB243SubclonalCTSplit[sapply(MB243SubclonalCTSplit, nrow) > 0]
+
+MB243SubclonalCTEvents <- purrr::reduce(sapply(MB243SubclonalCTSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+MB243ClonalCTs <-MB243SubclonalToPlot2[Status == "Clonal CT Event"]
+setkey(MB243CloneRes, chr, start, end)
+setkey(MB243ClonalCTs, chr, start, end)
+MB243ClonalCTs <- as.data.frame(MB243CloneRes[MB243ClonalCTs])
+MB243ClonalCTsSplit <- split(MB243ClonalCTs, f=~Clone_1 + Clone_2 + Clone_3 + Clone_4)
+MB243ClonalCTsSplit <- MB243ClonalCTsSplit[sapply(MB243ClonalCTsSplit, nrow) > 0]
+
+MB243ClonalCTEvents <- purrr::reduce(sapply(MB243ClonalCTsSplit, function(x) GenomicRanges::reduce(makeGRangesFromDataFrame(x))),c)
+
+
+
+length(MB243SubclonalCTEvents)/(length(MB243SubclonalCTEvents) + length(MB243SubclonalCNVEvents))
+
+setkey(MB243CloneRes, order)
+
+
+```
+
+## Plotting
+
+```{r}
+
+toPlot <- rbind(data.frame(Sample="MB243",Region=c("CT Region", "Not CT Region"),`Number Events`=c(length(MB243SubclonalCTEvents), length(MB243SubclonalCNVEvents))),
+data.frame(Sample="ST1RPDX",Region=c("CT Region", "Not CT Region"),`Number Events`=c(length(ST1RPDXSubclonalCTEvents), length(ST1RPDXSubclonalCNVEvents))),
+data.frame(Sample = "STPNuc", Region = c("CT Region", "Not CT Region"), `Number Events` = c(length(STPNucSubclonalCTEvents), length(STPNucSubclonalCNVEvents))),
+data.frame(Sample = "STPPDX", Region = c("CT Region", "Not CT Region"), `Number Events` = c(length(STPPDXSubclonalCTEvents), length(STPPDXSubclonalCNVEvents))))
+
+p <- ggplot(toPlot, aes(x=Sample, fill=Region, y=`Number.Events`)) + 
+    geom_bar(stat="identity") + theme_classic() + 
+    theme(legend.position = "none") + 
+    ylab("Number of Subclonal\nCopy Number Segments") + 
+    xlab("Sample") + 
+    scale_fill_manual(values = c("CT Region" = "#de77ae", "Not CT Region" = "#6ba82f"))
+
+
+pdf(file.path(out.dir, "prop_subclonal_changes_ct.pdf"))
+print(p)
+dev.off()
+
+png(file.path(out.dir,"prop_subclonal_changes_ct.png"), res=600, height=3, width=3, units="in")
+print(p)
+dev.off()
+
+```
+
+Statistics from that plot:
+
+```{r}
+toPlot <- data.table(toPlot)
+
+toPlot[Region=="CT Region", Number.Events, Sample][[2]]/toPlot[,sum(Number.Events),Sample][,V1]
+toPlot[,sum(Number.Events),Sample][,Sample]
+```
+
+
+# Percent of CT events that are in clonal vs subclonal regions
+
+Note that there are two separate things we can look at here: The first is whether a particular region is called as CT across clones, or a "clonal CT region".
+However, this is different from regions with clonal CNVs that are in chromothriptic regions. This is because a CT event can be found across all clones in the same area, 
+but the actual copy number states in each bin are not necessary clonal. In some bins, the SD of the total copy number seems to go up as high as 3!
+
+Nevertheless, I think this is more interesting, as we are interested in 'novel' CT regions among the clones, not necessarily differences in bps within regions that occur across
+clones.
+
+
+## Plotting
+
+```{r}
+
+toPlot <- rbind(data.frame(Sample="MB243",Region=c("Subclonal CT Region", "Clonal CT Region"),`Number Events`=c(length(MB243SubclonalCTEvents), length(MB243ClonalCTEvents))),
+data.frame(Sample="ST1RPDX",Region=c("Subclonal CT Region", "Clonal CT Region"),`Number Events`=c(length(ST1RPDXSubclonalCTEvents), length(ST1RPDXClonalCTEvents))),
+data.frame(Sample = "STPNuc", Region = c("Subclonal CT Region", "Clonal CT Region"), `Number Events` = c(length(STPNucSubclonalCTEvents), length(STPNucClonalCTEvents))),
+data.frame(Sample = "STPPDX", Region = c("Subclonal CT Region", "Clonal CT Region"), `Number Events` = c(length(STPPDXSubclonalCTEvents), length(STPPDXClonalCTEvents))))
+
+p <- ggplot(toPlot, aes(x=Sample, fill=Region, y=`Number.Events`*100)) + 
+    geom_bar(stat="identity", position='fill') + theme_classic() + 
+    theme(legend.position = "none") +
+    scale_y_continuous(labels = scales::percent)+ 
+    ylab("Copy Number Changes\nInduced by Chromothripsis") + 
+    xlab("Sample") + 
+    scale_fill_manual(values = c("Subclonal CT Region" = "#de77ae", "Clonal CT Region" = "#d01c8b"))
+
+
+pdf(file.path(out.dir, "prop_ct_subclonal_vs_clonal.pdf"))
+print(p)
+dev.off()
+
+png(file.path(out.dir, "prop_ct_subclonal_vs_clonal.png"), res = 600, height = 3, width = 3, units = "in")
+print(p)
+dev.off()
+
+```
+
+
+Statistics from that plot:
+
+```{r}
+toPlot <- data.table(toPlot)
+
+toPlot[Region=="Subclonal CT Region", Number.Events, Sample][[2]]/toPlot[,sum(Number.Events),Sample][,V1]
+toPlot[,sum(Number.Events),Sample][,Sample]
+
+```
+
+
+# All Event Segment Plots
+
+## Plotting
+
+```{r}
+
+toPlot <- rbind(data.frame(Sample="MB243",Event=c("Subclonal CT Event", "Clonal CT Event", "Subclonal CNV", "Clonal CNV"),`Number Events`=c(length(MB243SubclonalCTEvents), length(MB243ClonalCTEvents), length(MB243SubclonalCNVEvents), length(MB243ClonalCNVEvents))),
+data.frame(Sample="ST1RPDX",Event=c("Subclonal CT Event", "Clonal CT Event", "Subclonal CNV", "Clonal CNV"),`Number Events`=c(length(ST1RPDXSubclonalCTEvents), length(ST1RPDXClonalCTEvents), length(ST1RPDXSubclonalCNVEvents), length(ST1RPDXClonalCNVEvents))),
+data.frame(Sample="STPNuc",Event=c("Subclonal CT Event", "Clonal CT Event", "Subclonal CNV", "Clonal CNV"),`Number Events`=c(length(STPNucSubclonalCTEvents), length(STPNucClonalCTEvents), length(STPNucSubclonalCNVEvents), length(STPNucClonalCNVEvents))),
+data.frame(Sample="STPPDX",Event=c("Subclonal CT Event", "Clonal CT Event", "Subclonal CNV", "Clonal CNV"),`Number Events`=c(length(STPPDXSubclonalCTEvents), length(STPPDXClonalCTEvents), length(STPPDXSubclonalCNVEvents), length(STPPDXClonalCNVEvents))))
+
+toPlot$Event <- factor(toPlot$Event, levels=c("Clonal CNV", "Subclonal CNV", "Clonal CT Event", "Subclonal CT Event"))
+
+p <- ggplot(toPlot, aes(x=Sample, fill=Event, y=`Number.Events`*100)) + 
+    geom_bar(stat="identity", position='fill') + theme_classic() + 
+    theme(legend.position = "none") +
+    scale_y_continuous(labels = scales::percent)+ 
+    ylab("Copy Number Segments\nBy CT Status and Clonality") + 
+    xlab("Sample") + CNVchangeScale
+
+
+pdf(file.path(out.dir, "prop_all_events.pdf"))
+print(p)
+dev.off()
+
+png(file.path(out.dir, "prop_all_events.png"), res = 600, height = 3, width = 3, units = "in")
+print(p)
+dev.off()
+
+```
+
+
+Statistics from that plot:
+
+```{r}
+toPlot <- data.table(toPlot)
+toPlot[,.(prop.table(Number.Events), Event), Sample]
+```
+
+```{r}
+# toPlot <- data.table(toPlot)
+toPlot[,.(prop.table(Number.Events), Event), Sample][grepl("CT", Event),sum(V1),Sample]
+```
+
+```{r}
+# toPlot <- data.table(toPlot)
+toPlot[grepl("CT", Event), .(prop.table(Number.Events), Event), Sample][grepl("Subclonal", Event)]
+```
+
+# "Dot Plot" for clonal composition
+
+
+Here, we plot a summary of what percentage of each sample is assigned to each clone, as a "dot plot". This is basically just 
+a stacked barplot, but its more obvious that what we want count are the number of circles. 
+
+
+For this, we need to load in the cell assignments to clones:
+
+```{r}
+
+STPNucCloneAssignment <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_cell_clone_assignments.csv", header = TRUE)
+STPPDXCloneAssignment <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_cell_clone_assignments.csv", header = TRUE)
+ST1RNucCloneAssignment <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuc_cell_clone_assignments.csv", header = TRUE)
+
+## Temporary fix since the name is wrong in the file
+ST1RNucCloneAssignment[Clone == "Clone_2", Clone := "Normal"]
+STPNucCloneAssignment[Clone == "Diploid", Clone := "Normal"]
+
+ST1RPDXCloneAssignment <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_cell_clone_assignments.csv", header = TRUE)
+MB243CloneAssignment <- fread("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_cell_clone_assignments.csv", header = TRUE)
+
+STPNucCloneAssignment <- STPNucCloneAssignment[Clone %ni% "Not Assigned"]
+STPPDXCloneAssignment <- STPPDXCloneAssignment[Clone %ni% "Not Assigned"]
+ST1RNucCloneAssignment <- ST1RNucCloneAssignment[Clone %ni% "Not Assigned"]
+ST1RPDXCloneAssignment <- ST1RPDXCloneAssignment[Clone %ni% "Not Assigned"]
+MB243CloneAssignment <- MB243CloneAssignment[Clone %ni% "Not Assigned"]
+
+```
+
+Note that we did not assign any subclones in RCMB18. 
+
+
+
+```{r}
+
+
+toPlot <- data.table(rbind(cbind(melt(STPNucCloneAssignment[, prop.table(table(Clone))]), "Sample" = "LFS-MBP\nNuclei"),
+cbind(melt(STPPDXCloneAssignment[, prop.table(table(Clone))]), "Sample" = "LFS-MBP\nPDX"),
+cbind(melt(ST1RNucCloneAssignment[, prop.table(table(Clone))]), "Sample" = "LFS-MB1R\nNuclei"),
+cbind(melt(ST1RPDXCloneAssignment[, prop.table(table(Clone))]), "Sample" = "LFS-MB1R\nPDX"),
+cbind(melt(MB243CloneAssignment[, prop.table(table(Clone))]), "Sample" = "MB243\nNuclei"),
+data.frame("Clone" = "Clone_1", value = 1, Sample = "RCMB18P\nPDX")))
+
+toPlot[, Clone := factor(Clone, levels=c("Clone_1", "Clone_2", "Clone_3", "Clone_4", "Clone_5", "Normal"))]
+
+# p <- ggplot(toPlot, aes(x = Sample, y = Clone, size = value, color = Clone)) +
+#   geom_point() +
+#   scale_size_continuous(range=c(3,25))
+# print(p)
+
+```
+
+```{r}
+library(colorspace)
+library(farver)
+
+qualitative <- qualitative_hcl(7, c = 200)
+
+color_list <- list()
+i <- 1
+for (color in qualitative) {
+  color_hcl <- farver::decode_colour(color, to = "hcl")
+  color_list[[i]] <- sequential_hcl(h = color_hcl[, "h"], rev = TRUE, n = 5, c = color_hcl[, "c"], power = 1.5, l1 = 80, l2 = 30, alpha = 1, fixup = TRUE)
+  COL <- color_list[[i]]
+  plot(NULL,
+    xlim = c(0, length(COL)), ylim = c(0, 1),
+    xlab = "", ylab = "", xaxt = "n", yaxt = "n"
+  )
+  rect(0:(length(COL) - 1), 0, 1:length(COL), 1, col = COL)
+  i <- i + 1
+}
+
+```
+```{r}
+library(ggforce)
+library(ggnewscale)
+color_list <- rev(color_list)
+color_special <- color_list[[1]]
+color_list <- color_list[-1]
+
+
+p <- ggplot()
+i <- 1
+for(sample in unique(toPlot$Sample)){
+  test <- toPlot[Sample == sample]
+  totalArea <- pi
+  test[, area := value * totalArea]
+  test[, rad := sqrt(area)]
+
+  test[, y := cumsum(rad + c(0, rad)[1:length(rad)])]
+  test[, x := i*3.5]
+  cols <- rev(color_list[[i]])
+  p <- p + new_scale_fill() + scale_fill_manual(values = cols)
+  for (clone in test$Clone) {
+    if(clone == "Normal"){
+      p <- p + geom_circle(data = test[Clone == clone], aes(x0 = x, y0 = y, r = rad), fill = color_special[5], color = "black")
+    } else {
+      p <- p + geom_circle(data = test[Clone == clone], aes(x0 = x, y0 = y, r = rad, fill = Clone), color = "black")
+    }
+  }
+  i <- i + 1
+}
+
+p <- p + coord_fixed() + theme_void()# + theme(legend.position = "none")
+print(p)
+
+# print(p)
+
+fig.file <- paste0(out.dir, "/", "clone_dotplot.png")
+png(file = fig.file, width = 5, height = 4, units = "in", res = 600)
+print(p)
+dev.off()
+fig.file <- paste0(out.dir, "/", "clone_dotplot.pdf")
+pdf(file = fig.file, width = 7, height = 4)
+print(p)
+dev.off()
+
+p <- p + theme(legend.position = "none")
+fig.file <- paste0(out.dir, "/", "clone_dotplot_nolegend.png")
+png(file = fig.file, width = 4, height = 4, units = "in", res = 600)
+print(p)
+dev.off()
+
+
+p <- p + theme(legend.position = "none")
+fig.file <- paste0(out.dir, "/", "clone_dotplot_nolegend.pdf")
+pdf(file = fig.file, width = 4, height = 4)
+print(p)
+dev.off()
+
+
+
+```
+
+```{r}
+
+p <- ggplot()
+p <- p + scale_fill_manual(values = c("Normal" = "gray70", "Neoplastic" = "gray30"))
+i <- 1
+toPlot[,Tumor := ifelse(Clone=="Normal", "Normal", "Neoplastic")]
+for(sample in unique(toPlot$Sample)){
+  test <- toPlot[Sample == sample]
+  totalArea <- pi
+  test[, area := value * totalArea]
+  test[, rad := sqrt(area)]
+
+  test[, y := cumsum(rad + c(0, rad)[1:length(rad)])]
+  test[, x := i*3.5]
+
+  p <- p 
+  for (clone in test$Clone) {
+    if(clone == "Normal"){
+      p <- p + geom_circle(data = test[Clone == clone], aes(x0 = x, y0 = y, r = rad, fill=Tumor), color = "black")
+    } else {
+      p <- p + geom_circle(data = test[Clone == clone], aes(x0 = x, y0 = y, r = rad, fill=Tumor), color = "black")
+    }
+  }
+  i <- i + 1
+}
+
+p <- p + coord_fixed() + theme_void()# + theme(legend.position = "none")
+print(p)
+
+# print(p)
+
+fig.file <- paste0(out.dir, "/", "clone_dotplot_grayscale.png")
+png(file = fig.file, width = 5, height = 4, units = "in", res = 600)
+print(p)
+dev.off()
+fig.file <- paste0(out.dir, "/", "clone_dotplot_grayscale.pdf")
+pdf(file = fig.file, width = 7, height = 4)
+print(p)
+dev.off()
+
+p <- p + theme(legend.position = "none")
+fig.file <- paste0(out.dir, "/", "clone_dotplot_nolegend_grayscale.png")
+png(file = fig.file, width = 4, height = 4, units = "in", res = 600)
+print(p)
+dev.off()
+
+
+p <- p + theme(legend.position = "none")
+fig.file <- paste0(out.dir, "/", "clone_dotplot_nolegend_grayscale.pdf")
+pdf(file = fig.file, width = 4, height = 4)
+print(p)
+dev.off()
+
+
+
+```
+

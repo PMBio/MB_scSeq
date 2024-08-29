@@ -1,0 +1,572 @@
+---
+title: "Downsampling Analysis - Summary Plot"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+
+
+```{r}
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(CThripsos)
+library(ggplot2)
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+```
+
+
+
+# Load the downsampling data
+
+## CT 10
+
+```{r}
+ct.threshold <- 10
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", ct.threshold, sep = "_")
+if (!dir.exists(out.dir)) dir.create(out.dir)
+
+
+
+sample.list <- c("MB243", "ST1RPDX", "STP-Nuclei", "STP-PDX")
+names(sample.list) <- sample.list
+all.res <- rbindlist(lapply(sample.list, function(sample){
+  files <- list.files(path="results/", pattern = paste0("CTdownsample_", sample), full.names = TRUE)
+  names(files) <- paste0("Clone_", seq_along(files))
+  res <- rbindlist(lapply(files, fread),idcol = "Clone")
+}), idcol="Sample")
+
+all.res[[5]] <- NULL
+postive.examples <- all.res[,any(CT>0),.(Sample, Clone, chr)][V1==TRUE]
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+abline(v=5, col="red")
+dev.off()
+
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT>0), .(NumCells)]
+
+pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+abline(v=5, col="red")
+dev.off()
+```
+
+## CT 8
+
+
+```{r}
+
+ct.threshold <- 8
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", ct.threshold, sep = "_")
+if (!dir.exists(out.dir)) dir.create(out.dir)
+# all.res[[5]] <- NULL
+
+
+
+sample.list <- c("MB243", "ST1RPDX", "STP-Nuclei", "STP-PDX")
+names(sample.list) <- sample.list
+all.res <- rbindlist(lapply(sample.list, function(sample){
+  files <- list.files(path="results/", pattern = paste0("CTdownsample_", sample), full.names = TRUE)
+  names(files) <- paste0("Clone_", seq_along(files))
+  res <- rbindlist(lapply(files, fread),idcol = "Clone")
+}), idcol="Sample")
+
+
+colnames(all.res)[[5]] <- "Bootstrap Sample"
+
+
+postive.examples <- all.res[,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+abline(v=5, col="red")
+dev.off()
+
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells)]
+
+pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+abline(v=5, col="red")
+dev.off()
+```
+
+Lets try splitting up by clonal vs subclonal CTs. 
+
+```{r}
+
+STPNucCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNucres_1MB_clonal_cnv.rds")
+
+
+STPNucCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_Nuclei_CT_scores_50MB_",ct.threshold,"_2.rds"))
+
+STPPDXCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPPDX_clonal_cnv.rds")
+
+STPPDXCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# STPPDXCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP_PDX_CT_scores_50MB_8_2.rds") # nolint
+
+
+
+ST1RNucCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_clonal_cnv.rds")
+
+ST1RNucCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# ST1RNucCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_CT_scores_50MB_8_2.rds")
+
+
+ST1RPDXCloneRes <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1RPDX_clonal_cnv.rds")
+
+ST1RPDXCTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# ST1RPDXCT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_PDX_CT_scores_50MB_8_2.rds")
+
+
+MB243CloneRes <- readRDS("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_draft3_clonal_cnv.rds")
+
+MB243CTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_", ct.threshold,"_2.rds"))
+# MB243CT8Scores <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/MB243_CT_scores_50MB_8_2.rds")
+
+
+
+RCMB18CloneRes <- readRDS("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18PDX_clonal_cnv.rds")
+
+RCMB18CTScores <- readRDS(paste0("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/RCMB18_PDX_CT_scores_50MB_", ct.threshold,"_2.rds"))
+
+
+# Removing Normal clones
+clonal.stat <- rbind(
+data.frame("Sample" = "STP-Nuclei",
+           "chr" = colnames(STPNucCTScores$CTData$CT_CellsChrs),
+           "Clonal" = apply(STPNucCTScores$CTData$CT_CellsChrs[1:4,],2,\(x)all(x>0)),
+           "CT_Pos" = apply(STPNucCTScores$CTData$CT_CellsChrs[1:4,],2,\(x)any(x>0)))
+,
+data.frame("Sample" = "MB243",
+           "chr" = colnames(STPNucCTScores$CTData$CT_CellsChrs),
+           "Clonal" = apply(MB243CTScores$CTData$CT_CellsChrs[,],2,\(x)all(x>0)),
+           "CT_Pos" = apply(MB243CTScores$CTData$CT_CellsChrs[,],2,\(x)any(x>0)))
+,
+
+data.frame("Sample" = "ST1RPDX",
+           "chr" = colnames(STPNucCTScores$CTData$CT_CellsChrs),
+           "Clonal" = apply(ST1RPDXCTScores$CTData$CT_CellsChrs[,],2,\(x)all(x>0)),
+           "CT_Pos" = apply(ST1RPDXCTScores$CTData$CT_CellsChrs[,],2,\(x)any(x>0)))
+,
+
+data.frame("Sample" = "STP-PDX",
+           "chr" = colnames(STPNucCTScores$CTData$CT_CellsChrs),
+           "Clonal" = apply(STPPDXCTScores$CTData$CT_CellsChrs[,],2,\(x)all(x>0)),
+           "CT_Pos" = apply(STPPDXCTScores$CTData$CT_CellsChrs[,],2,\(x)any(x>0)))
+)
+# all.res[[5]] <- NULL
+
+all.res <- merge(all.res, clonal.stat, by=c("Sample", "chr"))
+
+
+
+```
+
+Lets make the plot:
+
+
+```{r}
+
+postive.examples.clonal <- unique(all.res[CT_Pos==TRUE & Clonal==TRUE,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+postive.examples.subclonal <- unique(all.res[CT_Pos==TRUE & Clonal==FALSE,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+postive.examples <- unique(all.res[CT_Pos==TRUE,.(Sample, Clone, chr)])
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample_split.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+abline(v=5, col="red")
+
+dev.off()
+
+
+postive.examples.clonal <- unique(all.res[CT_Pos==TRUE & Clonal==TRUE,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+postive.examples.subclonal <- unique(all.res[CT_Pos==TRUE & Clonal==FALSE,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+
+postive.examples <- unique(all.res[CT_Pos==TRUE,.(Sample, Clone, chr)])
+
+pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+abline(v=5, col="red")
+lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+dev.off()
+
+
+```
+
+
+Now we look at what confidence threshold we can use as a cutoff to improve this. 
+
+
+```{r}
+nchanges <- 8
+
+STPNucCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STPNuc2_1MB_boot_res.rds")
+
+STPPDXCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/STP-PDX_boot_res.rds")
+
+ST1RNucCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/st1r_nuc_boot_res.rds")
+ST1RPDXCloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/st1r_pdx_boot_res.rds")
+
+MB243CloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/mb243_boot_res.rds")
+
+RCMB18CloneBoot <- readRDS("/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/rcmb18_pdx_boot_res.rds")
+
+
+
+STPNucCloneBoot <- STPNucCloneBoot$Ploidy_4$k_10
+STPNucCloneBoot<-STPNucCloneBoot[sapply(STPNucCloneBoot, length)==4]
+
+
+STPPDXCloneBoot <- STPPDXCloneBoot$Ploidy_4$k_5
+
+STPPDXCloneBoot<-STPPDXCloneBoot[sapply(STPPDXCloneBoot, length)==4]
+
+
+
+ST1RNucCloneBoot <- ST1RNucCloneBoot$Ploidy_2$k_2
+ST1RNucCloneBoot <- ST1RNucCloneBoot[sapply(ST1RNucCloneBoot, length)==4]
+
+
+ST1RPDXCloneBoot <- ST1RPDXCloneBoot$Ploidy_2$k_3
+ST1RPDXCloneBoot<-ST1RPDXCloneBoot[sapply(ST1RPDXCloneBoot, length)==4]
+
+
+MB243CloneBoot <- c(MB243CloneBoot$Ploidy_3$k_1, MB243CloneBoot$Ploidy_4$k_8)
+MB243CloneBoot<-MB243CloneBoot[sapply(MB243CloneBoot, length)==4]
+
+
+RCMB18CloneBoot <- RCMB18CloneBoot$Ploidy_2$k_4
+RCMB18CloneBoot<-RCMB18CloneBoot[sapply(RCMB18CloneBoot, length)==4]
+
+
+sample.boot.list <- list(STPNucCloneBoot,STPPDXCloneBoot, ST1RNucCloneBoot,
+                         ST1RPDXCloneBoot, MB243CloneBoot, RCMB18CloneBoot)
+
+names(sample.boot.list) <- c("STP-Nuclei", "STP-PDX", "ST1R_Nuclei",
+                             "ST1RPDX", "MB243", "RCMB18")
+
+
+
+
+confidences.list <- list()
+expectations.list <- list()
+
+for(sample in names(sample.boot.list)){
+  
+  cur.sample.boot <- sample.boot.list[[sample]]
+  cellCoords <- cur.sample.boot[[1]]$pseudobulk
+  
+  
+    
+  cluster.boot.ct.res.chr <- lapply(names(cur.sample.boot), function(cluster){
+    
+      
+    cur.boot.cells <- sapply(cur.sample.boot[[cluster]]$boot, \(x) return(x$hmmcopy.res$state))
+    
+    rownames(cur.boot.cells) <- paste0(cellCoords$chr, ":", cellCoords$start, "-", cellCoords$end)
+    
+    
+    test <- CThripsos::CreateCThripsosObject(cur.boot.cells)
+    ct.out <- CThripsos::Calculate_CT_Cells(test, 50e6, ct.threshold, 2)
+    ct.out$CTData$CT_CellsChrs
+  
+    
+  })
+  
+  confidences <- sapply(cluster.boot.ct.res.chr, function(x) apply(x, 2,\(y) mean(y>0)))
+  expectations <- sapply(cluster.boot.ct.res.chr, function(x) apply(x, 2,\(y) mean(y)))
+  
+  confidences.list[[sample]] <- confidences
+  expectations.list[[sample]] <- expectations
+
+}
+
+confidences.list <- lapply(confidences.list, function(x) {
+  
+  colnames(x) <- paste0("Clone_",1:ncol(x))
+  return(x)
+  
+})
+
+confidences.m.list <- lapply(confidences.list, melt)
+
+confidences.m <- rbindlist(confidences.m.list, idcol="Sample")
+
+colnames(confidences.m)[2:3] <- c("chr", "Clone")
+```
+
+
+
+```{r}
+
+all.res <- merge(all.res, confidences.m, by=c("Sample","chr","Clone"))
+
+
+```
+
+
+```{r}
+Heatmap(acast(confidences.m, Sample+Clone ~ chr), cluster_rows = F, cluster_columns = F)
+
+```
+
+
+
+```{r}
+postive.examples.clonal <- unique(all.res[CT_Pos==TRUE & Clonal==TRUE & value > 0.5,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+postive.examples.subclonal <- unique(all.res[CT_Pos==TRUE & Clonal==FALSE & value > 0.5,.(Sample, Clone, chr)])
+
+percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+
+postive.examples <- unique(all.res[CT_Pos==TRUE & value > 0.5,.(Sample, Clone, chr)])
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample_split_filtered_0_5.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+abline(v=5, col="red")
+
+dev.off()
+# 
+# 
+# postive.examples.clonal <- all.res[Clonal==TRUE,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# postive.examples.subclonal <- all.res[Clonal==FALSE,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# 
+# percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells)]
+# 
+# pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_downsample_split_filtered_0_5.pdf'))
+# plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+# abline(v=5, col="red")
+# lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+# lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+# dev.off()
+
+
+```
+
+
+Lets try to plot per sample, with variance:
+
+
+```{r}
+# 
+# postive.examples.clonal <- unique(all.res[CT_Pos==TRUE & Clonal==TRUE & value > 0.5,.(Sample, Clone, chr)])
+# 
+# percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# postive.examples.subclonal <- unique(all.res[CT_Pos==TRUE & Clonal==FALSE & value > 0.5,.(Sample, Clone, chr)])
+# 
+# percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+
+postive.examples <- unique(all.res[CT_Pos==TRUE & value > 0.5,.(Sample, Clone, chr)])
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+samples <- unique(postive.examples$Sample)
+
+for (sample in samples){
+  
+  toPlot <- all.res[postive.examples, on=.(Sample, Clone, chr)][Sample==sample, mean(CT8>0),.(`Bootstrap Sample`, NumCells, Clonal)]
+  
+  pdf(file.path(out.dir,paste0(sample, '_percent_expected_nonzero_ct_downsample_split_filtered_0_5.pdf')))
+  p <- ggplot(toPlot, aes(x=factor(NumCells), y=V1, fill=Clonal)) + geom_boxplot() + theme_classic() + ylim(c(0,1))
+  print(p)
+  dev.off()
+
+}
+
+toPlotList <- list()
+
+for (sample in samples){
+  
+  toPlotList[[sample]] <- all.res[postive.examples, on=.(Sample, Clone, chr)][Sample==sample, mean(CT8>0), .(`Bootstrap Sample`, NumCells, Clonal)]
+
+}
+
+toPlot <- rbindlist((toPlotList))
+
+toPlot <- toPlot[,.(Sensitivity = median(V1), bottom=quantile(V1, 0.25), top=quantile(V1,0.75)), NumCells]
+
+pdf(file.path(out.dir,paste0('all_samples_IQR', '_percent_expected_nonzero_ct_downsample_split_filtered_0_5.pdf')))
+p <- ggplot(toPlot, aes(NumCells, Sensitivity)) + geom_point() + geom_line() + theme_classic() + ylim(c(0,1)) + geom_errorbar(aes(ymin=bottom, ymax=top), width=.2) + xlab("Number of Cells")
+print(p)
+dev.off()
+
+# 
+# pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample_split_filtered_0_5.pdf'))
+# plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+# lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+# lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+# abline(v=5, col="red")
+# 
+# dev.off()
+
+
+
+```
+
+Lets try the same plot, but with confidence on the x axis.
+
+
+```{r}
+
+# postive.examples.clonal <- all.res[Clonal==TRUE,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,.(value,mean(CT8)>0), .(NumCells, Sample,Clone, chr)]
+
+postive.examples <- all.res[,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,.(value,mean(CT8)>0), .(NumCells, Sample,Clone, chr)]
+
+value_mins <- sort(unique(percent.CT.events.detected$value))
+
+
+plot(value_mins, sapply(value_mins, \(x) return(percent.CT.events.detected[value>x & NumCells==5,mean(V2>0)])), type="b", pch=16, ylim=c(0,1))
+# 
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,.(value,CT8>0), .(NumCells, Sample,Clone, chr)]
+
+
+plot(value_mins, sapply(value_mins, \(x) return(percent.CT.events.detected[value>x & NumCells==5,mean(V2>0)])), type="b", pch=16, ylim=c(0,1))
+# postive.examples.subclonal <- all.res[Clonal==FALSE & NumCells == 5,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# postive.examples <- all.res[NumCells == 5,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# pdf(file.path(out.dir,'percent_expected_nonzero_ct_downsample_split.pdf'))
+# plot(percent.CT.events.detected$value, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+# lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+# lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+# abline(v=5, col="red")
+# 
+# dev.off()
+# 
+# 
+# postive.examples.clonal <- all.res[Clonal==TRUE,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.clonal <- all.res[postive.examples.clonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# postive.examples.subclonal <- all.res[Clonal==FALSE,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+# 
+# percent.CT.events.detected.subclonal <- all.res[postive.examples.subclonal, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+# 
+# 
+# 
+# percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells)]
+# 
+# pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_downsample.pdf'))
+# plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+# abline(v=5, col="red")
+# lines(percent.CT.events.detected.clonal$NumCells, percent.CT.events.detected.clonal$V1, pch=16, type="b", lty=3)
+# lines(percent.CT.events.detected.subclonal$NumCells, percent.CT.events.detected.subclonal$V1, pch=16, type="b", lty=5)
+# dev.off()
+
+
+```
+
+
+
+## CT 8 - Pellman
+
+
+```{r}
+ct.threshold <- 8
+
+out.dir <- paste("~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsoluteFigures/ct", ct.threshold, sep = "_")
+if (!dir.exists(out.dir)) dir.create(out.dir)
+
+
+
+sample.list <- c("BR_CL_170825_S2_F9_CNV")
+names(sample.list) <- sample.list
+all.res <- rbindlist(lapply(sample.list, function(sample){
+  files <- list.files(path="results/", pattern = paste0("CTdownsample_", sample), full.names = TRUE)
+  names(files) <- paste0("Clone_", seq_along(files))
+  res <- rbindlist(lapply(files, fread),idcol = "Clone")
+}), idcol="Sample")
+
+
+postive.examples <- all.res[,any(CT8>0),.(Sample, Clone, chr)][V1==TRUE]
+
+postive.examples <- postive.examples[chr==4]
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8)>0, .(NumCells, Sample,Clone, chr)][,mean(V1),NumCells]
+
+pdf(file.path(out.dir,'percent_expected_nonzero_ct_Clone2a_Pelmann_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% CT Events with expected non-zero score")
+abline(v=5, col="red")
+dev.off()
+
+
+percent.CT.events.detected <- all.res[postive.examples, on=.(Sample, Clone, chr)][,mean(CT8>0), .(NumCells)]
+
+pdf(file.path(out.dir,'percent_recovered_in_expectation_ct_Clone2a_Pelmann_downsample.pdf'))
+plot(percent.CT.events.detected$NumCells, percent.CT.events.detected$V1, ylim=c(0,1), pch=16, type="b", xlab="Number of Cells", ylab="% Recovered CT Events (in expectation)")
+abline(v=5, col="red")
+dev.off()
+```

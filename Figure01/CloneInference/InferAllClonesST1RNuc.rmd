@@ -1,0 +1,433 @@
+---
+title: "Test calling clonal cnvs in ST1R-Nuc"
+output:
+  html_document:
+    df_print: paged
+---
+Here, we look at the results of running scAbsolute on this sample.
+
+
+```{r}
+library(ComplexHeatmap)
+library(data.table)
+library(QDNAseq)
+library(RColorBrewer)
+library(HMMcopy)
+library(doParallel)
+library(gtools)
+library(ggplot2)
+
+
+source("~/scAbsolute-main/R/visualization.R")
+source("~/scAbsolute-main/R/mean-variance.R")
+source("~/scAbsolute-main/R/scAbsolute.R")
+source("~/scAbsolute-main/R/core.R")
+
+
+
+source("~/MB_SCSEQ/Figure01/CloneInference/commonSegmentation.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/plotFunctionsCNV.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/inferClonalCNVProfiles.R")
+source("~/MB_SCSEQ/Figure01/CloneInference/calculateBootstrappedStatistics.R")
+```
+
+## 10x data
+
+Load in the results for all the STP samples here:
+
+```{r}
+
+
+ST1R <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-Nuclei/500/predict/out.rds")
+protocolData(ST1R) <- AnnotatedDataFrame()
+colnames(ST1R) <- gsub(colnames(ST1R), pat = "\\-[0-9]\\.filtered\\.sorted$", rep = "")
+
+# STPRNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/STPR-Nuclei//500/predict/out.rds")
+
+# STPRNucres <- readRDS("~/groups/OE0585/internal/p163v/scAbsoluteWorkflow/results/scale/RCMB18-PDX/500/predict/out.rds")
+
+
+# STPPDXres <- STPPDXres[,STPPDXres$ploidy.mod %in% seq(1,4)]
+# STPRPDXres <- STPRPDXres[,STPRPDXres$ploidy.mod %in% seq(1,4)]
+# ST1R <- ST1R[,ST1R$ploidy.mod %in% seq(1,4)]
+# STPRNucres <- STPRNucres[,STPRNucres$ploidy.mod %in% seq(1,4)]
+
+```
+
+## ST1R clone identification
+
+```{r}
+
+
+hist(ST1R$observed.variance/ST1R$expected.variance, breaks = 50)
+abline(v=mad(ST1R$observed.variance/ST1R$expected.variance)*2+median(ST1R$observed.variance/ST1R$expected.variance))
+```
+
+There are clear outliers based on variance, which we remove.
+
+```{r}
+
+hist(ST1R$gini_normalized, breaks = 50)
+abline(v=mad(ST1R$gini_normalized)*2+median(ST1R$gini_normalized))
+
+```
+
+```{r}
+
+hist(ST1R$error, breaks = 60)
+abline(v=mad(ST1R$error)*2+median(ST1R$error))
+
+```
+
+
+```{r}
+
+var.filter <- mad(ST1R$observed.variance/ST1R$expected.variance)*2+median(ST1R$observed.variance/ST1R$expected.variance) > ST1R$observed.variance/ST1R$expected.variance
+gini.filter <- mad(ST1R$gini_normalized)*2+median(ST1R$gini_normalized) > ST1R$gini_normalized
+# error.filter <- mad(ST1R$error)*2+median(ST1R$error) > ST1R$error
+## Ploidy 0 doesn't work for ploidy normalization
+ploidy.filter <- ST1R$ploidy.mod > 0
+ST1R <- ST1R[,var.filter&gini.filter&ploidy.filter]
+
+```
+
+
+Lets plot all the cell results for manual review:
+
+```{r}
+
+plotDataset(ST1R, file="ST1R_Nuc_scAbs_allcells.pdf", f=plotCopynumber)
+
+```
+
+
+```{r}
+ST1RSegmented <- mapCellsToCommonBreakpoints(ST1R, mergeWidth = 2)
+
+ploidy.data <- data.frame(chr="ploidy", "start"=-1, end=-1)
+ploidy.data <- cbind(ploidy.data, t(data.frame(ST1R$ploidy.mod)))
+
+ST1R.ploidy.normed <- copy(ST1RSegmented)
+
+for(cell in colnames(ST1R)){
+  
+  ST1R.ploidy.normed[,(cell):= ST1R.ploidy.normed[,cell, with=F]/ ST1R[,cell]$ploidy.mod*2]
+}
+
+ST1R.ploidy.normed <- rbind(ST1R.ploidy.normed, ploidy.data, use.names=F)
+
+
+```
+
+```{r}
+dendroOrder <- rowSums(abs(t(assayDataElement(ST1R, "copynumber"))-ST1R$ploidy.mod), na.rm = TRUE)
+
+annot_rows = rowAnnotation(ploidy=ST1R$ploidy.mod, "obs/exp var"=ST1R$observed.variance/ST1R$expected.variance, "gini"=ST1R$gini, error=ST1R$error)
+
+
+ploidy.normed.man.wardd2 <- hclust(dist(t(ST1R.ploidy.normed[,c(-1,-2,-3)]), method="manhattan"), method = "ward.D2")
+
+  
+plotComplexHeatmapCommonSegs(ST1RSegmented, clust.rows=ploidy.normed.man.wardd2, annot_rows=annot_rows)
+  
+```
+
+```{r}
+
+annot_rows = rowAnnotation(ploidy=ST1R$ploidy.mod, "obs/exp var"=ST1R$observed.variance/ST1R$expected.variance, "gini"=ST1R$gini, error=ST1R$error)
+
+
+bins.man.wardd2 <- clusterMannhattanOnBins(ST1R)
+
+denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),dendroOrder)
+
+
+# xx <- prcomp(t(ST1RSegmented[complete.cases(ST1RSegmented),c(-1,-2,-3), with=FALSE]))$x[,"PC1"]
+# denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),xx)
+
+plotComplexHeatmapCommonSegs(ST1RSegmented, clust.rows=denrToPlot, annot_rows=annot_rows)#, column_title = unique(featureData(ST1R)$chromosome))
+  
+```
+
+```{r}
+
+annot_rows = rowAnnotation(ploidy=ST1R$ploidy.mod, "obs/exp var"=ST1R$observed.variance/ST1R$expected.variance, "gini"=ST1R$gini, error=ST1R$error)
+
+
+bins.cor.wardd2 <- clusterCorOnBins(ST1R)
+
+denrToPlot <- reorder(as.dendrogram(bins.cor.wardd2),dendroOrder)
+
+
+# xx <- prcomp(t(ST1RSegmented[complete.cases(ST1RSegmented),c(-1,-2,-3), with=FALSE]))$x[,"PC1"]
+# denrToPlot <- reorder(as.dendrogram(bins.man.wardd2),xx)
+
+plotComplexHeatmapCommonSegs(ST1RSegmented, clust.rows=denrToPlot, annot_rows=annot_rows)
+  
+```
+
+
+```{r}
+set.seed(42)# set the seed of random number generator 
+
+list.of.packages <- c("HMMcopy", "doParallel", "gtools", "ggplot2")
+
+
+# ignore all "simple" diagnostic messages (warnings or errors)
+suppressMessages(invisible(lapply(list.of.packages, require, character.only = TRUE)))
+
+
+window_length <- 5e7
+min_cnv_changes <- 10
+
+nBootSamples <- 50
+min_consec_cnvs <- 5
+
+nthread <- 10
+registerDoParallel(nthread)
+
+```
+
+
+##                       READ IN DATA OF INTEREST
+############################################################################
+```{r, warning=FALSE, message=FALSE}
+## set sample of interest
+sample = 'ST1R-Nuclei'
+
+
+
+## bin size param
+bin_kb = 20
+bin = bin_kb*1000
+
+
+
+
+
+# get the readcounts for the bin size of interest
+path_cells <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                     sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+path_to_readcounts <- paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/all_samples/', 
+                             sample,'/readCount_filtered_bam/bin_', bin_kb,'kb/')
+files <- list.files(path_to_readcounts, pattern = '.seg', full.names = F)
+
+# set the paths to the reference files
+gfile = paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.gc.seg')
+mfile =  paste0('/omics/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/HMMcopy_10x_scDNA/refdata/bin_', bin_kb, 'kb/hg19.', bin_kb, 'kb.map.seg')
+
+
+
+## Make list of cells
+cellList <- list()
+
+names(files) <- sapply(strsplit(files, split = "_|-"), `[[`, 3)
+
+cellList <- foreach(cell = colnames(ST1R)) %dopar% {
+  print(paste0("Processing cell: ", cell))
+  
+  
+  rfile <- paste(path_cells,files[[cell]],sep = "")
+  cellData <- wigsToRangedData(rfile, gfile, mfile)
+  
+  correctReadcount2(cellData)
+
+}
+names(cellList) <- colnames(ST1R)
+
+
+
+```
+
+
+```{r}
+library(doParallel)
+registerDoParallel(10)
+
+# clonal.cnv.res.boot <- inferClonalCNVs(ST1R, cellList, bootstrap = TRUE, nBoot=101)
+# saveRDS(clonal.cnv.res.boot, file="st1r_nuc_boot_res.rds")
+clonal.cnv.res.boot<-readRDS("st1r_nuc_boot_res.rds")
+```
+
+
+```{r}
+for(ploidy in names(clonal.cnv.res.boot)){
+  
+  for(k in 1:12){
+    pdf(paste0("ST1R_",ploidy,"_k_", k, "clones_psuedobulk.pdf"), height = 11, width = 8.5)
+    print(plotClonalProfilesAtK(clonal.cnv.res.boot[ploidy], k))
+    dev.off()
+  }
+  
+}
+
+
+
+```
+
+
+
+Lets plot some GOF metrics for the different k selections:
+
+```{r}
+
+
+clusterGOFmetrics <- computeGOFMetrics(clonal.cnv.res.boot)
+
+#First ploidy 2:
+
+ploidy2GOF <- sapply(clusterGOFmetrics$Ploidy_2, `[[`, 1)
+
+
+pdf("ST1R_Nuc_ploidy2GOFbyK.pdf", onefile = TRUE)
+plot(seq_len(ncol(ploidy2GOF)), ploidy2GOF["RMSE",], xlab="K", ylab="RMSE", type = "b", pch=16)
+plot(seq_len(ncol(ploidy2GOF)), ploidy2GOF["logRMSE",], xlab="K", ylab="logRMSE", type = "b", pch=16)
+plot(seq_len(ncol(ploidy2GOF)), ploidy2GOF["AIC",], xlab="K", ylab="AIC", type = "b", pch=16)
+plot(seq_len(ncol(ploidy2GOF)), ploidy2GOF["BIC",], xlab="K", ylab="BIC", type = "b", pch=16)
+dev.off()
+
+
+
+```
+
+
+```{r}
+
+ploidy2.fstat <- sapply(clonal.cnv.res.boot$Ploidy_2, returnBootstrapFStats)
+ploidy2.fstat
+```
+
+
+The F-Stat is suggesting that we actually have a lot of small outliers to remove. 
+
+Lets try to UMAP/t-SNE this to take a look at the data. 
+
+
+```{r}
+library(uwot)
+library(ggplot2)
+
+my.umap <- umap(dist(t(ST1RSegmented[,-c(1:3), with=F])[ST1R$ploidy.mod==2,]))
+
+cluster_assignment <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_2$k_6, `[`, "cells"), idcol="Cluster")
+
+toPlot <- data.frame(UMAP1 = my.umap[,1], UMAP2=my.umap[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.umap), cluster_assignment$cells)])
+
+ggplot(toPlot, aes(UMAP1, UMAP2, col=Cluster)) + geom_point()
+
+
+```
+
+
+```{r}
+
+my.mds <- cmdscale(dist(t(ST1RSegmented[,-c(1:3), with=F])[ST1R$ploidy.mod==2,]))
+
+
+toPlot <- data.frame(MDS1 = my.mds[,1], MDS2=my.mds[,2], Cluster=cluster_assignment$Cluster[match(rownames(my.mds), cluster_assignment$cells)])
+
+
+
+ggplot(toPlot, aes(MDS1, MDS2, col=Cluster)) + geom_point()
+
+```
+
+```{r}
+cluster_assignemntk2 <- rbindlist(lapply(clonal.cnv.res.boot$Ploidy_2$k_2, `[`, "cells"), idcol="Cluster")
+
+toPlot <- data.frame(MDS1 = my.mds[,1], MDS2=my.mds[,2], Cluster=cluster_assignemntk2$Cluster[match(rownames(my.mds), cluster_assignemntk2$cells)])
+ggplot(toPlot, aes(MDS1, MDS2, col=Cluster)) + geom_point()
+
+```
+
+Here, the f-stat seems to insist that k=6 is a better solution than k=2, but the UMAP doesn't 
+really support that, (even when its tuned to small neighbourhoods,not shown)
+The MDS makes it look more reasonable, explaining at least why removing some of the points improves
+the F stat.
+
+
+
+According the the f-stat, we select k=6 for the ploidy 2 state. 
+The other states have too few cells to form a clone. 
+
+
+ 
+```{r}
+
+clonalCNVProfiles <- clonal.cnv.res.boot$Ploidy_2$k_1$Cluster_1$pseudobulk[,c(1,2,3), with=FALSE]
+
+ploidy2clones <- lapply(clonal.cnv.res.boot$Ploidy_2$k_6, function(k.res){
+  return(round(2^(k.res$hmmres$mus[,1]+1)[k.res$hmmres$state]))
+})
+
+ploidy2clones <- do.call(cbind,ploidy2clones[as.logical(sapply(ploidy2clones, length))])
+  
+clonalCNVProfiles <- cbind(clonalCNVProfiles,ploidy2clones)
+
+colnames(clonalCNVProfiles)[-c(1:3)] <- paste0("Clone_", 1:2) 
+
+```
+
+
+
+```{r}
+
+saveRDS(clonalCNVProfiles, file="~/ST1R_draft_clonal_cnv.rds")
+png("~/ST1R_clonal_cnv_draft.png", width=10, height=5, unit="in", res=1000)
+print(plotComplexHeatmapCommonSegs(clonalCNVProfiles, clust.rows = FALSE, column_title = unique(clonalCNVProfiles$chr)))
+dev.off()
+```
+
+
+```{r}
+
+
+ploidy2clonesCells <- lapply(clonal.cnv.res.boot$Ploidy_2$k_6, function(x) return(x['cells']))
+
+ploidy2clonesCells <- ploidy2clonesCells[sapply(ploidy2clonesCells, function(x) length(x[[1]]))>=5]
+
+allCloneCells <- ploidy2clonesCells
+
+names(allCloneCells) <- paste0("Clone_", 1:2) 
+
+
+
+cloneAssignment <- rbindlist(allCloneCells, idcol = "Clone")
+
+if(any(!colnames(ST1R)%in%cloneAssignment$cells)){
+  notAssignedCells <- data.frame(Clone = "Not Assigned", cells=colnames(ST1R)[!colnames(ST1R)%in%cloneAssignment$cells])
+  cloneAssignment <- rbind(cloneAssignment, notAssignedCells)
+}
+
+
+
+write.csv(cloneAssignment, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuc_cell_clone_assignments.csv")
+
+```
+
+```{r}
+
+HMMCopyMat <- sapply(cellList, `[[`, "copy")
+
+HMMCopyMat <- cbind(cellList[[1]][,c(1:3)], HMMCopyMat)
+
+write.csv(HMMCopyMat, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_hmmcopy_20kb_logR.csv")
+
+
+```
+
+
+```{r}
+library(dplyr)
+
+gccor <- estimate_gc_correction(ST1R)
+
+scAbsoluteRC <- assayDataElement(ST1R,"calls")*1/gccor
+
+write.csv(scAbsoluteRC, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuclei_scAbsolute_500kb_corReadCount.csv")
+
+scAbsoluteTCN <- assayDataElement(ST1R,"copynumber")
+write.csv(scAbsoluteTCN, file="~/groups/OE0540/internal/projects/chromothripsis_medulloblastoma/scAbsolute_clones/ST1R_Nuc_hmmcopy_500kb_TCN.csv")
+
+```
+
