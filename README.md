@@ -6,6 +6,10 @@
 
 This repository was created to store and provide all scripts used in the manuscript "Multi-omic and single-cell profiling of chromothriptic medulloblastoma reveals genomic and transcriptomic consequences of genome instability". This includes the scripts for generation of figures and for the analyses implemented. In line with the structure of the manuscript, the scripts are split according each individual Figures. 
 
+For an example environment set up to run the related code, as well as an example of one analyzed sample for scDNAseq clone identification and CT calling, please see the asssociated Code Ocean capsule here:
+
+To reproduce analyses for other samples, you can download the related processed data from this Zenodo repository: 10.5281/zenodo.13348419 
+
 **Figure01** - Genetic heterogeneity in medulloblastomas with chromothripsis. 
 
 **Figure02** - Chromothripsis is a major event for the formation of double-minute chromosomes.
