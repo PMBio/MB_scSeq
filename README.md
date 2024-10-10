@@ -6,7 +6,7 @@
 
 This repository was created to store and provide all scripts used in the manuscript "Multi-omic and single-cell profiling of chromothriptic medulloblastoma reveals genomic and transcriptomic consequences of genome instability". This includes the scripts for generation of figures and for the analyses implemented. In line with the structure of the manuscript, the scripts are split according each individual Figures. 
 
-For an example environment set up to run the related code, as well as an example of one analyzed sample for scDNAseq clone identification and CT calling, please see the asssociated Code Ocean capsule here:
+For an example environment set up to run the related code, as well as an example of one analyzed sample for scDNAseq clone identification and CT calling, please see the asssociated Code Ocean capsule here: https://codeocean.com/capsule/5086193/tree 
 
 To reproduce analyses for other samples, you can download the related processed data from this Zenodo repository: 10.5281/zenodo.13348419 
 
@@ -23,3 +23,4 @@ To reproduce analyses for other samples, you can download the related processed 
 **Supplementary_Material** - Additional Figures provided in the Supplementary Material of the manuscript.
 
 Scripts for running the cellranger pipelines for [scRNA](https://support.10xgenomics.com/single-cell-gene-expression) and [scDNA](https://support.10xgenomics.com/single-cell-dna) were not included here, as they are simply mirroring single line bash commands from the 10X analysis pipeline.
+
