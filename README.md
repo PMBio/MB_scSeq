@@ -24,3 +24,8 @@ To reproduce analyses for other samples, you can download the related processed 
 
 Scripts for running the cellranger pipelines for [scRNA](https://support.10xgenomics.com/single-cell-gene-expression) and [scDNA](https://support.10xgenomics.com/single-cell-dna) were not included here, as they are simply mirroring single line bash commands from the 10X analysis pipeline.
 
+## Reproducing locally
+
+The code for reproducing the analysis of scDNAseq data was tested to run on Linux operating systems () under R 4.2.0. The recommended reproduction instruction is to clone the Code Ocean capsule above, or to download the docker image, and to download the processed HMMCopy and scAbsolute data from the Zenodo repository. 
+
+The scRNAseq analysis should be reproducable using the provided scripts under python 3.12.5 using scanpy version 1.10.2. 
